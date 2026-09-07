@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PKI Manager - pamperins.lan</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('static', filename='pki.css') }}">
+</head>
+<body>
+<header>
+  <h1>PKI MANAGER <span class="dim">pamperins.lan</span></h1>
+  <div class="hdr-right">
+    <span id="overall" class="badge unknown">scanning</span>
+    <span id="stamp" class="dim"></span>
+    <button id="refresh" class="btn small">refresh</button>
+    {% if auth %}<form method="post" action="{{ url_for('logout') }}" class="inline">
+      <button class="btn small">logout</button></form>{% endif %}
+  </div>
+</header>
+
+<main>
+  <section id="dash" class="cards"><p class="dim">loading status...</p></section>
+
+  <section class="panel">
+    <h2>ACTIONS</h2>
+    <div class="controls">
+      <label>host
+        <select id="host">
+          {% for h in hosts %}<option value="{{ h }}">{{ h }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>nextcloud mode
+        <select id="mode">
+          {% for m in modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="chk"><input type="checkbox" id="autorefresh" checked> auto-refresh 60s</label>
+    </div>
+    <div class="actions">
+      {% for name, meta in actions.items() %}
+      <button class="btn act" data-action="{{ name }}" data-kind="{{ meta[1] or '' }}"
+              data-confirm="{{ '1' if meta[2] else '' }}" title="{{ meta[3] }}">
+        {{ meta[0] }}{% if meta[1] == 'host' %} <span class="tag">host</span>{% endif %}
+      </button>
+      {% endfor %}
+    </div>
+    <p class="dim note">
+      PIN / touch operations ({{ tty_actions|join(', ') }}) are not available in the
+      browser - run them from <code>pki-manager.sh</code> on the console.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>OUTPUT <button id="clear" class="btn small">clear</button></h2>
+    <pre id="out" class="term">ready.</pre>
+  </section>
+</main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <p id="modal-text"></p>
+    <div class="modal-btns">
+      <button id="modal-no" class="btn">cancel</button>
+      <button id="modal-yes" class="btn danger">run it</button>
+    </div>
+  </div>
+</div>
+
+<script>window.PKI = { csrf: "{{ csrf }}" };</script>
+<script src="{{ url_for('static', filename='pki.js') }}"></script>
+</body>
+</html>

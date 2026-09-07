@@ -1,0 +1,25 @@
+# Install: sudo cp pki-web.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now pki-web
+[Unit]
+Description=PKI Manager web UI (pamperins.lan)
+After=network-online.target
+
+[Service]
+Type=simple
+User=YOURUSER
+Group=YOURUSER
+WorkingDirectory=/home/YOURUSER/pki-manger
+Environment=PKI_CONF=/home/YOURUSER/pki/pki.conf
+ExecStart=/usr/bin/python3 /home/YOURUSER/pki-manger/pki-web.py
+Restart=on-failure
+RestartSec=5
+
+# It shells out to ssh and reads the PKI tree; keep the rest locked down.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/YOURUSER/pki/logs
+
+[Install]
+WantedBy=multi-user.target

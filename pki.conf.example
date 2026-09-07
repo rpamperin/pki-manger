@@ -1,0 +1,104 @@
+# pki.conf - configuration for pki-manager.sh and pki-web.py
+#
+#   install:  cp pki.conf.example ~/pki/pki.conf && chmod 600 ~/pki/pki.conf
+#
+# This file is sourced by bash. It holds credentials, so it must be mode 600
+# and must never be committed. Every value below is optional - the defaults
+# shown are what the scripts use when a key is absent.
+
+# ---------------------------------------------------------------- layout ---
+PKI_ROOT=/home/YOURUSER/pki
+DOMAIN=pamperins.lan
+
+#CERT_DIR="$PKI_ROOT/certs"
+#ROOT_CA_DIR="$PKI_ROOT/root-ca"
+#INT_CA_DIR="$PKI_ROOT/intermediate-ca"
+#LOG_DIR="$PKI_ROOT/logs"
+#RENEW_SCRIPT="$PKI_ROOT/renew-certs.sh"
+
+# Certificate file names inside those directories.
+#ROOT_CA_NAME=pamperins-root-ca
+#INT_CA_NAME=pamperins-intermediate-ca
+# The stale anchor name that keeps turning up in /etc/ldap/ldap.conf.
+#STALE_CA_NAME=pamperins-ca.crt
+
+# Expiry thresholds for the dashboard (days).
+#WARN_DAYS=30
+#CRIT_DAYS=7
+
+# ----------------------------------------------------------------- hosts ---
+# Add a host by appending its id to HOSTS and defining HOST_<id>_ADDR/_ROLES.
+# Roles drive everything: which ports are probed and what "deploy" pushes.
+# Known roles: samba ldaps webmin nextcloud apache dns
+HOSTS="dc gateway ns1"
+
+HOST_dc_ADDR=10.0.2.2
+HOST_dc_ROLES="samba ldaps webmin nextcloud"
+
+HOST_gateway_ADDR=10.0.2.3
+HOST_gateway_ROLES="apache webmin"
+
+HOST_ns1_ADDR=10.0.2.4
+HOST_ns1_ROLES="dns webmin"
+
+# Per-host overrides (defaults shown are derived, not literal):
+#HOST_dc_FQDN=dc.pamperins.lan
+#HOST_dc_CERT="$CERT_DIR/dc.pamperins.lan.crt"
+#HOST_dc_KEY="$CERT_DIR/dc.pamperins.lan.key"
+
+# ------------------------------------------------------------------- ssh ---
+# Key auth is strongly preferred. SSH_PASS needs sshpass and is a last resort.
+SSH_USER=root
+#SSH_PORT=22
+#SSH_KEY=/home/YOURUSER/.ssh/id_ed25519
+#SSH_PASS=
+# Only needed when SSH_USER is not root and passwordless sudo is unavailable.
+#SUDO_PASS=
+
+#NET_TIMEOUT=5      # per-probe connect timeout
+#CMD_TIMEOUT=120    # per-remote-command timeout
+
+# --------------------------------------------------------------- services ---
+#WEBMIN_PORT=10000
+#WEBMIN_DIR=/etc/webmin
+#WEBMIN_CERT=/etc/webmin/miniserv.cert   # holds leaf + intermediate
+#WEBMIN_KEY=/etc/webmin/miniserv.pem
+#WEBMIN_CONF=/etc/webmin/miniserv.conf
+#WEBMIN_SERVICE=webmin
+
+#SAMBA_TLS_DIR=/var/lib/samba/private/tls
+#SAMBA_SERVICE=samba-ad-dc
+#LDAP_CONF=/etc/ldap/ldap.conf
+#TRUST_ANCHOR_DIR=/usr/local/share/ca-certificates
+
+#APACHE_SERVICE=apache2
+#APACHE_CERT_DIR=/etc/ssl/pamperins
+
+#NEXTCLOUD_DIR=/var/www/nextcloud
+#NEXTCLOUD_USER=www-data
+#NEXTCLOUD_PHP=php
+# URL used to decide whether trust actually works; defaults to the apache host.
+#NEXTCLOUD_PROBE_URL=https://gateway.pamperins.lan/
+
+# Technitium DNS takes a PKCS#12. Leave the password unset to skip DNS certs.
+#TECHNITIUM_SERVICE=dns
+#TECHNITIUM_USER=dns
+#TECHNITIUM_PFX=/etc/dns/ssl/pamperins.pfx
+#TECHNITIUM_PFX_PASS=
+
+# --------------------------------------------------------------- yubikey ---
+# The root CA private key lives in PIV slot 9c and never leaves the key.
+# NEVER put the PIV PIN in this file - ykman prompts for it on the terminal.
+#YUBIKEY_SLOT=9c
+#PKCS11_MODULE=/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so
+#YK_ROOT_KEY_URI="pkcs11:object=SIGN%20key;type=private"
+#INT_CA_DAYS=1825
+
+# ---------------------------------------------------------------- web ui ---
+#WEB_BIND=127.0.0.1     # binding anywhere else requires WEB_TOKEN
+#WEB_PORT=7443
+# Shared secret for the web login. Generate: openssl rand -hex 24
+#WEB_TOKEN=
+# Optional TLS for the web UI itself.
+#WEB_TLS_CERT=/home/YOURUSER/pki/certs/workstation.pamperins.lan.crt
+#WEB_TLS_KEY=/home/YOURUSER/pki/certs/workstation.pamperins.lan.key

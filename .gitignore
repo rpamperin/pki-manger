@@ -1,0 +1,18 @@
+# Never commit credentials or key material.
+pki.conf
+*.key
+*.pem
+*.pfx
+*.p12
+*.srl
+certs/
+root-ca/
+intermediate-ca/
+logs/
+*.log
+
+# Local runtime
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PKI Manager - login</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('static', filename='pki.css') }}">
+</head>
+<body class="centered">
+  <form method="post" class="panel login">
+    <h1>PKI MANAGER</h1>
+    <p class="dim">pamperins.lan</p>
+    <input type="password" name="token" placeholder="access token" autofocus autocomplete="current-password">
+    <button class="btn" type="submit">unlock</button>
+    {% if err %}<p class="msg-err">{{ err }}</p>{% endif %}
+  </form>
+</body>
+</html>
