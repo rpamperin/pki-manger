@@ -56,6 +56,7 @@ WEB_TOKEN = CFG.get("WEB_TOKEN", "")
 # Anything not in here cannot be run from the browser.
 ACTIONS = {
     "status":              ("Refresh status",        None,   False, "Re-run every probe"),
+    "preflight":           ("Preflight check",       None,   False, "Verify config, CA, tools and ssh"),
     "renew":               ("Renew certificates",    None,   True,  "Runs renew-certs.sh"),
     "deploy":              ("Deploy certs",          "host", True,  "Push service certs for one host"),
     "deploy-all":          ("Deploy to ALL",         None,   True,  "Push service certs everywhere"),

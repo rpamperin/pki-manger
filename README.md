@@ -30,6 +30,30 @@ $EDITOR ~/pki/pki.conf
 Everything host- and credential-specific lives in `~/pki/pki.conf`. Nothing is
 hardcoded in the scripts. Override the location with `PKI_CONF=/path/to/conf`.
 
+## SSH access
+
+Every remote action runs over ssh as `SSH_USER` (default `root`) and needs
+root on the far end. Key auth is assumed — the scripts use `BatchMode`, so a
+password-only host fails immediately with `Permission denied` rather than
+prompting.
+
+Either give your key root access:
+
+```bash
+ssh-copy-id root@10.0.2.2        # repeat per host
+```
+
+or run as yourself and let sudo do the privileged part, in `pki.conf`:
+
+```bash
+SSH_USER=rpamperin
+SSH_KEY=/home/rpamperin/.ssh/id_ed25519
+#SUDO_PASS=...                   # only if that user lacks passwordless sudo
+```
+
+`./pki-manager.sh --run preflight` tells you which hosts are reachable, which
+refuse auth, and which can reach root.
+
 ## Starting from nothing
 
 If there is no CA yet, build one. Review the plan first — creating the root key
@@ -53,6 +77,17 @@ issuance uses the intermediate and needs no PIN and no touch.
 Order matters. Trusting the new root is additive and safe; swapping certs is
 not. Do it in this order or LDAPS and Samba break mid-change:
 
+Check first. `preflight` verifies config, tools, the CA, the issued certs and
+ssh-plus-root on every host, changes nothing, and prints the fix for whatever
+fails:
+
+```bash
+./pki-manager.sh --run preflight
+```
+
+Do not start until it says `ready`. Then, one step at a time — read the output
+of each before running the next:
+
 ```bash
 ./renew-certs.sh --force                    # 1. issue the new service certs
 ./pki-manager.sh --run trust-push-all       # 2. trust the new root EVERYWHERE
@@ -61,6 +96,10 @@ not. Do it in this order or LDAPS and Samba break mid-change:
 ./pki-manager.sh --run ldap-fix-all         # 4. repoint ldap.conf
 ./pki-manager.sh --run trust-cleanup-all    # 5. only once everything is green
 ```
+
+Pasting all six at once runs each regardless of whether the one before it
+failed, which buries the real error. Chain them with `&&` if you want them
+unattended.
 
 Step 2 never removes an anchor. If a host already has one at the same path,
 the old one is kept alongside as `*-superseded-<date>.crt` and stays trusted,

@@ -88,6 +88,7 @@ ${C_HEAD}ACTIONS${C_RESET}
    4  Push root CA trust             10  View logs
    5  Push Webmin cert (leaf+int)    11  Samba TLS ownership fix
    6  Fix Webmin miniserv.conf        y  YubiKey management
+                                      p  Preflight check
                                       r  Refresh      q  Quit
 EOF
 }
@@ -199,6 +200,7 @@ while true; do
         10) printf 'lines [60]> '; read -r n || true; pki_run_action logs "${n:-60}" ;;
         11) run_hostwise samba-fix ;;
         y|Y) yk_menu ;;
+        p|P) pki_run_action preflight ;;
         r|R|'') ;;
         q|Q) clear; exit 0 ;;
         *)  pki_err "no such option: $choice" ;;

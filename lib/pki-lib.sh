@@ -809,7 +809,11 @@ act_deploy() {
     local h="$1" crt key fqdn tmpb rc=0
     pki_host_valid "$h" || { pki_err "unknown host: $h"; return 1; }
     crt=$(pki_host_cert "$h"); key=$(pki_host_key "$h"); fqdn=$(pki_host_fqdn "$h")
-    pki_require_files "$crt" "$key" "$INT_CA_CRT" "$ROOT_CA_CRT" || return 1
+    pki_ca_ready || { pki_ca_missing_msg; return 1; }
+    if ! pki_require_files "$crt" "$key"; then
+        pki_err "$fqdn has no certificate yet - run: ./renew-certs.sh --force"
+        return 1
+    fi
     pki_info "== deploy $h ($fqdn) roles: $(pki_host_roles "$h")"
 
     if pki_host_has_role "$h" apache; then
@@ -933,7 +937,7 @@ act_logs() {
 # ------------------------------------------------------------ dispatcher ----
 # Single validated entry point. The web UI never builds a command line.
 
-PKI_ACTIONS="status renew deploy deploy-all trust-push trust-push-all webmin-push
+PKI_ACTIONS="status preflight renew deploy deploy-all trust-push trust-push-all webmin-push
 webmin-push-all webmin-fix webmin-fix-all ldap-fix ldap-fix-all samba-fix
 nextcloud-certcheck verify-tls logs issue issue-all trust-cleanup
 trust-cleanup-all yk-info yk-slot yk-export-cert yk-retries
@@ -969,9 +973,17 @@ pki_run_action() {
     case "$action" in
         _never_) ;;
     esac
+    # One clear message instead of the same complaint once per host.
+    case "$action" in
+        deploy|deploy-all|issue|issue-all|webmin-push|webmin-push-all)
+            pki_ca_ready || { pki_ca_missing_msg; return 1; } ;;
+        trust-push|trust-push-all)
+            [ -r "$ROOT_CA_CRT" ] || { pki_ca_missing_msg; return 1; } ;;
+    esac
     pki_log "action=$action arg=$arg"
     case "$action" in
         status)              pki_collect_status | pki_render_text ;;
+        preflight)           act_preflight ;;
         renew)               act_renew ;;
         deploy)              act_deploy "$arg" ;;
         deploy-all)          for h in $HOSTS; do act_deploy "$h" || rc=1; done ;;
@@ -1271,7 +1283,7 @@ pki_issue_cert() {
     crt=$(pki_host_cert "$h"); key=$(pki_host_key "$h")
     csr="$CERT_DIR/$fqdn.csr"; ext=$(mktemp)
 
-    pki_require_files "$INT_CA_CRT" "$INT_CA_KEY" || { rm -f "$ext"; return 1; }
+    pki_ca_ready || { pki_ca_missing_msg; rm -f "$ext"; return 1; }
     mkdir -p "$CERT_DIR"
 
     if [ ! -s "$key" ] || [ "$rotate" = 1 ]; then
@@ -1304,4 +1316,123 @@ pki_issue_cert() {
         pki_err "$fqdn issued but does NOT verify against the root - not deploying this"
         return 1
     fi
+}
+
+# ========================================================== preflight =======
+
+# Classify why ssh to a host does or does not work, so the fix is obvious.
+pki_ssh_probe() {  # host -> ok|closed|auth|hostkey|timeout|fail
+    local h="$1" out rc
+    if ! pki_tcp "$(pki_host_addr "$h")" "$SSH_PORT" 3; then printf 'closed'; return; fi
+    out=$(pki_ssh "$h" true 2>&1); rc=$?
+    [ "$rc" = 0 ] && { printf 'ok'; return; }
+    case "$out" in
+        *"Permission denied"*)            printf 'auth' ;;
+        *"Host key verification failed"*) printf 'hostkey' ;;
+        *"Connection timed out"*)         printf 'timeout' ;;
+        *)                                printf 'fail' ;;
+    esac
+}
+
+pki_ca_ready() {
+    [ -r "$ROOT_CA_CRT" ] && [ -r "$INT_CA_CRT" ] && [ -r "$INT_CA_KEY" ]
+}
+
+pki_ca_missing_msg() {
+    pki_err "no CA yet - nothing can be issued or deployed"
+    [ -r "$ROOT_CA_CRT" ] || pki_err "  missing root cert:   $ROOT_CA_CRT"
+    [ -r "$INT_CA_CRT" ]  || pki_err "  missing intermediate: $INT_CA_CRT"
+    [ -r "$INT_CA_KEY" ]  || pki_err "  missing intermediate key: $INT_CA_KEY"
+    pki_err "create it:  ./pki-init.sh --dry-run   then   ./pki-init.sh"
+}
+
+# Check everything a cutover needs, change nothing, and say how to fix what fails.
+act_preflight() {
+    local ok=0 bad=0 warn=0
+    mark() {  # state label fix
+        case "$1" in
+            ok)   printf '  %s[ OK ]%s %s\n' "$C_OK" "$C_RESET" "$2"; ok=$((ok+1)) ;;
+            warn) printf '  %s[WARN]%s %s\n' "$C_WARN" "$C_RESET" "$2"; warn=$((warn+1))
+                  [ -n "${3:-}" ] && printf '         %s%s%s\n' "$C_DIM" "$3" "$C_RESET" ;;
+            *)    printf '  %s[FAIL]%s %s\n' "$C_ERR" "$C_RESET" "$2"; bad=$((bad+1))
+                  [ -n "${3:-}" ] && printf '         %s-> %s%s\n' "$C_DIM" "$3" "$C_RESET" ;;
+        esac
+    }
+
+    printf '%sCONFIG%s\n' "$C_HEAD" "$C_RESET"
+    if [ "$PKI_CONF_LOADED" = 1 ]; then
+        case "$PKI_CONF_PERM" in
+            600|400) mark ok "pki.conf loaded ($PKI_CONF)" ;;
+            *) mark warn "pki.conf mode $PKI_CONF_PERM ($PKI_CONF)" "chmod 600 $PKI_CONF" ;;
+        esac
+    else
+        mark fail "no pki.conf at $PKI_CONF" "cp pki.conf.example $PKI_CONF && chmod 600 $PKI_CONF"
+    fi
+
+    printf '\n%sTOOLS%s\n' "$C_HEAD" "$C_RESET"
+    local t
+    for t in openssl ssh scp; do
+        command -v "$t" >/dev/null 2>&1 && mark ok "$t" \
+            || mark fail "$t missing" "sudo apt install openssh-client openssl"
+    done
+    command -v ykman >/dev/null 2>&1 && mark ok "ykman" \
+        || mark warn "ykman missing (only needed to create/manage the root CA)" "sudo apt install yubikey-manager"
+    if pki_pkcs11_detect; then mark ok "openssl PKCS#11 ($PKCS11_MODE)"
+    else mark warn "no openssl PKCS#11 (only needed for root CA operations)" \
+         "sudo apt install libengine-pkcs11-openssl opensc"; fi
+
+    printf '\n%sCA%s\n' "$C_HEAD" "$C_RESET"
+    if pki_ca_ready; then
+        mark ok "root CA  $(basename "$ROOT_CA_CRT") ($(pki_cert_days "$ROOT_CA_CRT")d)"
+        mark ok "intermediate ($(pki_cert_days "$INT_CA_CRT")d)"
+        if openssl verify -CAfile "$ROOT_CA_CRT" "$INT_CA_CRT" >/dev/null 2>&1; then
+            mark ok "intermediate verifies against the root"
+        else
+            mark fail "intermediate does not verify against the root" "rebuild: ./pki-init.sh --replace-ca"
+        fi
+    else
+        mark fail "no CA at $PKI_ROOT" "./pki-init.sh --dry-run, then ./pki-init.sh"
+    fi
+
+    printf '\n%sCERTIFICATES%s\n' "$C_HEAD" "$C_RESET"
+    local h crt n=0
+    for h in $HOSTS; do
+        crt=$(pki_host_cert "$h")
+        if [ -r "$crt" ]; then
+            mark ok "$(pki_host_fqdn "$h") ($(pki_cert_days "$crt")d)"; n=$((n+1))
+        else
+            mark warn "$(pki_host_fqdn "$h") not issued yet" "./renew-certs.sh --force"
+        fi
+    done
+
+    printf '\n%sHOSTS%s\n' "$C_HEAD" "$C_RESET"
+    for h in $HOSTS; do
+        case "$(pki_ssh_probe "$h")" in
+            ok)
+                if pki_ssh_sudo "$h" true >/dev/null 2>&1; then
+                    mark ok "$h ($(pki_host_addr "$h")) ssh + root"
+                else
+                    mark fail "$h ssh works but cannot get root" \
+                        "give $SSH_USER passwordless sudo, or set SUDO_PASS in pki.conf"
+                fi ;;
+            auth)
+                mark fail "$h ($(pki_host_addr "$h")) ssh auth refused for $SSH_USER" \
+                    "ssh-copy-id $SSH_USER@$(pki_host_addr "$h")  - or set SSH_USER/SSH_KEY in pki.conf" ;;
+            closed)
+                mark fail "$h ($(pki_host_addr "$h")) port $SSH_PORT closed" "is the host up? check SSH_PORT" ;;
+            hostkey)
+                mark fail "$h host key changed" "ssh-keygen -R $(pki_host_addr "$h")" ;;
+            timeout)
+                mark fail "$h ($(pki_host_addr "$h")) timed out" "check routing/firewall" ;;
+            *)
+                mark fail "$h ssh failed" "try: ssh $SSH_USER@$(pki_host_addr "$h")" ;;
+        esac
+    done
+
+    printf '\n%s%s ok, %s warn, %s fail%s\n' "$C_BOLD" "$ok" "$warn" "$bad" "$C_RESET"
+    if [ "$bad" -gt 0 ]; then
+        printf '%sfix the FAIL items before running a cutover%s\n' "$C_ERR" "$C_RESET"
+        return 1
+    fi
+    printf '%sready%s\n' "$C_OK" "$C_RESET"
 }
