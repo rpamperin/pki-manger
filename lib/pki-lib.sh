@@ -323,8 +323,8 @@ pki_probe_yubikey() {
     serial=$(timeout 10 ykman list --serials 2>/dev/null | head -1)
     tries=$(printf '%s' "$out" | sed -n 's/.*PIN tries remaining: *//p' | head -1)
 
-    if printf '%s' "$out" | grep -q "^Slot ${YUBIKEY_SLOT}"; then
-        algo=$(printf '%s' "$out" | sed -n "/^Slot ${YUBIKEY_SLOT}/,/^Slot /p" \
+    if pki_yk_slot_occupied "$YUBIKEY_SLOT"; then
+        algo=$(printf '%s' "$out" | sed -n "/^[Ss]lot ${YUBIKEY_SLOT}/I,/^[Ss]lot /Ip" \
                | sed -n 's/.*[Pp]rivate key type: *//p' | head -1)
         pki_rec yubikey slot-$YUBIKEY_SLOT ok "key present" "serial ${serial:-?}, ${algo:-key}, PIN tries ${tries:-?}"
     else
@@ -1044,6 +1044,20 @@ pki_yk_import_cert() {  # slot infile
     return 1
 }
 
+# ykman 4.x prints "Slot 9c", 5.x prints "Slot 9C". A guard that protects a
+# root CA key must not hinge on that, so fall back to asking for the slot's
+# certificate: a slot with no key cannot produce one.
+pki_yk_slot_occupied() {  # slot -> 0 if a key is present
+    local slot="${1:-$YUBIKEY_SLOT}" out tmp rc=1
+    out=$(timeout 15 ykman piv info 2>/dev/null) || return 1
+    printf '%s' "$out" | grep -qi "^Slot ${slot}\b" && return 0
+    tmp=$(mktemp)
+    pki_yk_export_cert "$slot" "$tmp" 2>/dev/null && [ -s "$tmp" ] \
+        && openssl x509 -in "$tmp" -noout >/dev/null 2>&1 && rc=0
+    rm -f "$tmp"
+    return $rc
+}
+
 act_yk_info() {
     pki_yk_ready || return 1
     pki_info "== yubikey"
@@ -1064,7 +1078,18 @@ act_yk_slot() {
     pki_info "== slot $slot certificate"
     openssl x509 -in "$tmp" -noout -subject -issuer -serial -dates -fingerprint -sha256 2>&1
     printf '\n'
-    openssl x509 -in "$tmp" -noout -text 2>/dev/null | sed -n '/X509v3 Basic/,/^ *X509v3 [A-Z]/p' | head -6
+    pki_info "-- extensions"
+    openssl x509 -in "$tmp" -noout -ext basicConstraints,keyUsage,subjectKeyIdentifier 2>/dev/null \
+        | sed 's/^/   /' || pki_warn "no X509v3 extensions present"
+    printf '\n'
+    # the one thing that decides whether this cert can sign an intermediate
+    if openssl x509 -in "$tmp" -noout -text 2>/dev/null | grep -q 'CA:TRUE'; then
+        pki_ok "usable as a CA (basicConstraints CA:TRUE)"
+    else
+        pki_err "NOT usable as a CA - no basicConstraints CA:TRUE"
+        pki_err "a cert without it cannot sign an intermediate; the root must be recreated"
+        rm -f "$tmp"; return 1
+    fi
     rm -f "$tmp"
 }
 

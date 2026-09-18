@@ -11,13 +11,16 @@ set -uo pipefail
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF_DIR/lib/pki-lib.sh"
 
-DRY=0 FORCE_SLOT=0 FORCE_CA=0 REUSE_SLOT=0
+DRY=0 FORCE_SLOT=0 FORCE_CA=0 REUSE_SLOT=0 INT_ONLY=0
 usage() {
     cat <<EOF
 usage: pki-init.sh [options]
 
   -n, --dry-run        print every command, change nothing
       --replace-ca     overwrite an existing intermediate CA on disk
+      --intermediate-only
+                       root CA already exists: create only the intermediate
+                       (use this to resume after step 4 failed)
       --reuse-slot     keep the key already in slot $YUBIKEY_SLOT and carry on
                        (use this to retry after a failure past key generation)
       --replace-slot   overwrite a key already in YubiKey slot $YUBIKEY_SLOT (DESTRUCTIVE)
@@ -32,6 +35,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -n|--dry-run)   DRY=1; shift ;;
         --replace-ca)   FORCE_CA=1; shift ;;
+        --intermediate-only) INT_ONLY=1; FORCE_CA=1; shift ;;
         --reuse-slot)   REUSE_SLOT=1; shift ;;
         --replace-slot) FORCE_SLOT=1; shift ;;
         -h|--help)      pki_load_conf; usage; exit 0 ;;
@@ -87,7 +91,7 @@ if [ "$DRY" = 0 ] && ! timeout 15 ykman piv info >/dev/null 2>&1; then
 fi
 
 # refuse to clobber an existing root key: it would orphan every cert under it
-if [ "$DRY" = 0 ] && timeout 15 ykman piv info 2>/dev/null | grep -q "^Slot ${YUBIKEY_SLOT}"; then
+if [ "$DRY" = 0 ] && [ "$INT_ONLY" = 0 ] && pki_yk_slot_occupied "$YUBIKEY_SLOT"; then
     if [ "$REUSE_SLOT" = 1 ]; then
         pki_info "slot $YUBIKEY_SLOT already holds a key - reusing it (--reuse-slot)"
     elif [ "$FORCE_SLOT" = 1 ]; then
@@ -108,14 +112,40 @@ if [ -s "$INT_CA_KEY" ] && [ "$FORCE_CA" = 0 ]; then
     exit 1
 fi
 
+if [ "$INT_ONLY" = 1 ]; then
+    step "resume: intermediate only"
+    if [ ! -r "$ROOT_CA_CRT" ]; then
+        pki_err "no root CA at $ROOT_CA_CRT - cannot create an intermediate without it"
+        exit 1
+    fi
+    if ! openssl x509 -in "$ROOT_CA_CRT" -noout -text 2>/dev/null | grep -q 'CA:TRUE'; then
+        pki_err "$ROOT_CA_CRT is not a CA certificate (no basicConstraints CA:TRUE)"
+        pki_err "it cannot sign an intermediate - the root must be recreated"
+        exit 1
+    fi
+    pki_ok "root CA present: $(openssl x509 -in "$ROOT_CA_CRT" -noout -subject | sed 's/subject=*//')"
+    pki_ok "valid $(pki_cert_days "$ROOT_CA_CRT")d, CA:TRUE"
+    if [ "$DRY" = 0 ]; then
+        if RESOLVED=$(pki_pkcs11_resolve_key "$YUBIKEY_SLOT"); then
+            YK_ROOT_KEY_URI="$RESOLVED"
+            pki_ok "PKCS#11 key URI: $RESOLVED"
+        else
+            pki_err "no PKCS#11 private key for slot $YUBIKEY_SLOT"
+            pki_err "diagnose: ./pki-manager.sh --run yk-pkcs11"
+            exit 1
+        fi
+    fi
+fi
+
 # -------------------------------------------------------------- 1 layout ----
-step "1/5 directory layout under $PKI_ROOT"
+[ "$INT_ONLY" = 1 ] || step "1/5 directory layout under $PKI_ROOT"
 for d in "$ROOT_CA_DIR" "$INT_CA_DIR" "$CERT_DIR" "$LOG_DIR"; do
     run mkdir -p "$d" && pki_info "   $d"
 done
 [ "$DRY" = 1 ] || chmod 700 "$INT_CA_DIR" "$CERT_DIR"
 
 # ------------------------------------------------------- 2 root CA on key ----
+if [ "$INT_ONLY" = 0 ]; then
 step "2/5 root CA keypair on YubiKey slot $YUBIKEY_SLOT"
 pki_info "   algorithm $YK_KEY_ALGO, touch policy ${YK_TOUCH_POLICY:-ALWAYS}"
 pki_warn "the private key is created on the device and can never be read out"
@@ -203,6 +233,8 @@ else
         && pki_ok "root certificate written to slot $YUBIKEY_SLOT" \
         || pki_warn "could not store the cert on the key (harmless: $ROOT_CA_CRT is authoritative)"
 fi
+
+fi   # end of root CA creation (skipped by --intermediate-only)
 
 # --------------------------------------------------- 4 intermediate CA ------
 step "4/5 intermediate CA (key on disk, signed by the YubiKey root)"
