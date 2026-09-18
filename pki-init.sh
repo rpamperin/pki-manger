@@ -118,9 +118,13 @@ if [ "$INT_ONLY" = 1 ]; then
         pki_err "no root CA at $ROOT_CA_CRT - cannot create an intermediate without it"
         exit 1
     fi
-    if ! openssl x509 -in "$ROOT_CA_CRT" -noout -text 2>/dev/null | grep -q 'CA:TRUE'; then
+    if ! pki_cert_is_ca "$ROOT_CA_CRT"; then
         pki_err "$ROOT_CA_CRT is not a CA certificate (no basicConstraints CA:TRUE)"
-        pki_err "it cannot sign an intermediate - the root must be recreated"
+        pki_err "this is the throwaway bootstrap cert: the root self-sign never completed"
+        pki_err ""
+        pki_err "the KEY in slot $YUBIKEY_SLOT is fine - only the certificate is wrong."
+        pki_err "re-sign it without regenerating the key:"
+        pki_err "    ./pki-init.sh --reuse-slot"
         exit 1
     fi
     pki_ok "root CA present: $(openssl x509 -in "$ROOT_CA_CRT" -noout -subject | sed 's/subject=*//')"
@@ -182,7 +186,7 @@ else
     || timeout 180 ykman piv generate-certificate -s "$ROOT_CA_SUBJECT" \
         -d 1 "$YUBIKEY_SLOT" "$PUB" >/dev/null 2>&1 \
     || { pki_err "could not write the bootstrap certificate"; exit 1; }
-    pki_ok "bootstrap certificate in slot $YUBIKEY_SLOT"
+    pki_warn "slot now holds a THROWAWAY certificate - not a CA, replaced in the next step"
 fi
 
 # The module only exposes the key now that the slot holds a certificate, so
@@ -204,34 +208,47 @@ if [ "$DRY" = 0 ]; then
 fi
 
 pki_info "   signing the real root certificate with the on-device key (touch required)"
+CACNF="$ROOT_CA_DIR/root-ca.cnf"
 if [ "$DRY" = 1 ]; then
     run openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$YK_ROOT_KEY_URI" \
-        -subj "$ROOT_CA_SUBJECT" -days "$ROOT_CA_DAYS" \
-        -addext "basicConstraints=critical,CA:TRUE" \
-        -addext "keyUsage=critical,keyCertSign,cRLSign" \
-        -addext "subjectKeyIdentifier=hash" -out "$ROOT_CA_CRT"
+        -config "$CACNF" -extensions v3_ca -days "$ROOT_CA_DAYS" -out "$ROOT_CA_CRT"
 else
+    pki_root_ca_cnf "$CACNF" "$ROOT_CA_SUBJECT"
     if ! openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$YK_ROOT_KEY_URI" \
-            -subj "$ROOT_CA_SUBJECT" -days "$ROOT_CA_DAYS" \
-            -addext "basicConstraints=critical,CA:TRUE" \
-            -addext "keyUsage=critical,keyCertSign,cRLSign" \
-            -addext "subjectKeyIdentifier=hash" \
+            -config "$CACNF" -extensions v3_ca -days "$ROOT_CA_DAYS" \
             -out "$ROOT_CA_CRT" 2>&1; then
         pki_err "self-signing failed - check YK_ROOT_KEY_URI ($YK_ROOT_KEY_URI) and PKCS11_MODULE"
         pki_err "diagnose: ./pki-manager.sh --run yk-pkcs11"
         pki_err "retry without regenerating the key: ./pki-init.sh --reuse-slot"
+        pki_err "NOTE: slot $YUBIKEY_SLOT still holds the throwaway bootstrap certificate,"
+        pki_err "      which is NOT a usable CA. The root is not finished until this step is."
         exit 1
     fi
     chmod 644 "$ROOT_CA_CRT"
-    if ! openssl x509 -in "$ROOT_CA_CRT" -noout -text 2>/dev/null | grep -q 'CA:TRUE'; then
-        pki_err "root certificate lacks basicConstraints CA:TRUE - refusing to continue"
+    if ! pki_cert_is_ca "$ROOT_CA_CRT"; then
+        pki_err "root certificate came out without basicConstraints CA:TRUE"
+        pki_err "it cannot sign an intermediate - refusing to continue"
         exit 1
     fi
-    pki_ok "root CA: $ROOT_CA_CRT ($(pki_cert_days "$ROOT_CA_CRT")d)"
-    # store the real cert on the key, replacing the bootstrap one
-    pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT" >/dev/null 2>&1 \
-        && pki_ok "root certificate written to slot $YUBIKEY_SLOT" \
-        || pki_warn "could not store the cert on the key (harmless: $ROOT_CA_CRT is authoritative)"
+    pki_ok "root CA: $ROOT_CA_CRT ($(pki_cert_days "$ROOT_CA_CRT")d, CA:TRUE)"
+
+    # Replace the bootstrap cert on the key, then read back what is actually
+    # there. Without this a failed import leaves the throwaway cert in place
+    # and everything downstream fails much later with a confusing error.
+    if ! pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT" >/dev/null 2>&1; then
+        pki_err "could not write the root certificate to slot $YUBIKEY_SLOT"
+        pki_err "the slot still holds the throwaway bootstrap certificate"
+        exit 1
+    fi
+    VERIFY=$(mktemp)
+    if pki_yk_export_cert "$YUBIKEY_SLOT" "$VERIFY" && pki_cert_is_ca "$VERIFY"; then
+        pki_ok "slot $YUBIKEY_SLOT now holds the real root certificate (verified CA:TRUE)"
+    else
+        pki_err "slot $YUBIKEY_SLOT does not hold a CA certificate after import"
+        pki_err "check: ./pki-manager.sh --run yk-slot $YUBIKEY_SLOT"
+        rm -f "$VERIFY"; exit 1
+    fi
+    rm -f "$VERIFY"
 fi
 
 fi   # end of root CA creation (skipped by --intermediate-only)

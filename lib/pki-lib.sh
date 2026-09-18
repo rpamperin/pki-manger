@@ -1464,6 +1464,29 @@ act_preflight() {
     printf '%sready%s\n' "$C_OK" "$C_RESET"
 }
 
+# An explicit config beats relying on the system openssl.cnf defaults or on
+# -addext: both vary by distro and version, and a root CA that silently comes
+# out without basicConstraints is useless and hard to notice.
+pki_root_ca_cnf() {  # outfile subject
+    cat > "$1" <<EOX
+[req]
+distinguished_name = dn
+prompt             = no
+x509_extensions    = v3_ca
+[dn]
+$(printf '%s' "$2" | sed 's#^/##; s#/#\n#g' | sed 's/ *= */ = /')
+[v3_ca]
+basicConstraints     = critical,CA:TRUE
+keyUsage             = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+EOX
+}
+
+# 0 if the certificate carries basicConstraints CA:TRUE
+pki_cert_is_ca() {
+    openssl x509 -in "$1" -noout -text 2>/dev/null | grep -q 'CA:TRUE'
+}
+
 # ------------------------------------------------- PKCS#11 key discovery ----
 # OpenSC labels PIV slots "PIV AUTH key" (9a), "SIGN key" (9c), "KEY MAN key"
 # (9d), "CARD AUTH key" (9e), but labels vary by module and version. Getting
