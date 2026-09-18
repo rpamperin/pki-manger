@@ -11,13 +11,15 @@ set -uo pipefail
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF_DIR/lib/pki-lib.sh"
 
-DRY=0 FORCE_SLOT=0 FORCE_CA=0
+DRY=0 FORCE_SLOT=0 FORCE_CA=0 REUSE_SLOT=0
 usage() {
     cat <<EOF
 usage: pki-init.sh [options]
 
   -n, --dry-run        print every command, change nothing
       --replace-ca     overwrite an existing intermediate CA on disk
+      --reuse-slot     keep the key already in slot $YUBIKEY_SLOT and carry on
+                       (use this to retry after a failure past key generation)
       --replace-slot   overwrite a key already in YubiKey slot $YUBIKEY_SLOT (DESTRUCTIVE)
   -h, --help           this
 
@@ -30,6 +32,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -n|--dry-run)   DRY=1; shift ;;
         --replace-ca)   FORCE_CA=1; shift ;;
+        --reuse-slot)   REUSE_SLOT=1; shift ;;
         --replace-slot) FORCE_SLOT=1; shift ;;
         -h|--help)      pki_load_conf; usage; exit 0 ;;
         *) echo "ERR unknown option: $1" >&2; exit 2 ;;
@@ -39,7 +42,14 @@ done
 pki_load_conf
 
 run() {  # echo in dry-run, execute otherwise
-    if [ "$DRY" = 1 ]; then printf '   $ %s\n' "$*"; return 0; fi
+    if [ "$DRY" = 1 ]; then
+        # quote every argument: the PKCS#11 URI contains ';' and subjects
+        # contain spaces, so unquoted output is not safe to copy and paste
+        local a out=""
+        for a in "$@"; do out="$out $(printf '%q' "$a")"; done
+        printf '   $%s\n' "$out"
+        return 0
+    fi
     "$@"
 }
 
@@ -78,7 +88,9 @@ fi
 
 # refuse to clobber an existing root key: it would orphan every cert under it
 if [ "$DRY" = 0 ] && timeout 15 ykman piv info 2>/dev/null | grep -q "^Slot ${YUBIKEY_SLOT}"; then
-    if [ "$FORCE_SLOT" = 1 ]; then
+    if [ "$REUSE_SLOT" = 1 ]; then
+        pki_info "slot $YUBIKEY_SLOT already holds a key - reusing it (--reuse-slot)"
+    elif [ "$FORCE_SLOT" = 1 ]; then
         pki_warn "slot $YUBIKEY_SLOT is occupied and --replace-slot was given: it will be OVERWRITTEN"
         printf '%stype REPLACE to continue: %s' "$C_WARN" "$C_RESET"
         read -r ans; [ "$ans" = REPLACE ] || { pki_info "aborted"; exit 1; }
@@ -109,7 +121,9 @@ pki_info "   algorithm $YK_KEY_ALGO, touch policy ${YK_TOUCH_POLICY:-ALWAYS}"
 pki_warn "the private key is created on the device and can never be read out"
 PUB="$ROOT_CA_DIR/$ROOT_CA_NAME.pub.pem"
 
-if [ "$DRY" = 1 ]; then
+if [ "$REUSE_SLOT" = 1 ] && [ "$DRY" = 0 ]; then
+    pki_info "   skipping generation, using the existing slot key"
+elif [ "$DRY" = 1 ]; then
     run ykman piv keys generate --algorithm "$YK_KEY_ALGO" \
         --pin-policy "${YK_PIN_POLICY:-ONCE}" --touch-policy "${YK_TOUCH_POLICY:-ALWAYS}" \
         "$YUBIKEY_SLOT" "$PUB"
@@ -141,6 +155,24 @@ else
     pki_ok "bootstrap certificate in slot $YUBIKEY_SLOT"
 fi
 
+# The module only exposes the key now that the slot holds a certificate, so
+# this is the first moment the URI can be checked. Doing it here means a wrong
+# URI is reported before it can waste the key.
+if [ "$DRY" = 0 ]; then
+    if RESOLVED=$(pki_pkcs11_resolve_key "$YUBIKEY_SLOT"); then
+        [ "$RESOLVED" = "$YK_ROOT_KEY_URI" ] \
+            && pki_ok "PKCS#11 key URI verified: $RESOLVED" \
+            || { YK_ROOT_KEY_URI="$RESOLVED"
+                 pki_warn "configured URI did not resolve; using $RESOLVED"
+                 pki_warn "add to pki.conf:  YK_ROOT_KEY_URI=\"$RESOLVED\"" ; }
+    else
+        pki_err "no PKCS#11 private key found for slot $YUBIKEY_SLOT"
+        pki_err "diagnose:  ./pki-manager.sh --run yk-pkcs11"
+        pki_err "then retry:  ./pki-init.sh --reuse-slot   (keeps the key just generated)"
+        exit 1
+    fi
+fi
+
 pki_info "   signing the real root certificate with the on-device key (touch required)"
 if [ "$DRY" = 1 ]; then
     run openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$YK_ROOT_KEY_URI" \
@@ -156,6 +188,8 @@ else
             -addext "subjectKeyIdentifier=hash" \
             -out "$ROOT_CA_CRT" 2>&1; then
         pki_err "self-signing failed - check YK_ROOT_KEY_URI ($YK_ROOT_KEY_URI) and PKCS11_MODULE"
+        pki_err "diagnose: ./pki-manager.sh --run yk-pkcs11"
+        pki_err "retry without regenerating the key: ./pki-init.sh --reuse-slot"
         exit 1
     fi
     chmod 644 "$ROOT_CA_CRT"
@@ -190,7 +224,9 @@ else
             -CA "$ROOT_CA_CRT" -CAkey "$YK_ROOT_KEY_URI" \
             -CAcreateserial -days "$INT_CA_DAYS" -extfile "$EXT" \
             -out "$INT_CA_CRT" 2>&1; then
-        rm -f "$EXT"; pki_err "intermediate signing failed"; exit 1
+        rm -f "$EXT"; pki_err "intermediate signing failed"
+        pki_err "retry without regenerating the key: ./pki-init.sh --reuse-slot --replace-ca"
+        exit 1
     fi
     rm -f "$EXT"; chmod 644 "$INT_CA_CRT"
     if openssl verify -CAfile "$ROOT_CA_CRT" "$INT_CA_CRT" >/dev/null 2>&1; then

@@ -69,6 +69,17 @@ extractable), self-signs it with proper CA extensions, then creates an
 intermediate CA on disk signed by that root. It refuses to overwrite a slot
 that already holds a key, or an intermediate that already exists.
 
+If anything fails after the key is generated, retry without regenerating it:
+
+```bash
+./pki-manager.sh --run yk-pkcs11    # what the token exposes, and which URI works
+./pki-init.sh --reuse-slot          # keep the key in 9c, redo the rest
+```
+
+`yk-pkcs11` exists because a wrong `YK_ROOT_KEY_URI` only shows up at signing
+time. Init resolves the URI itself as soon as the slot has a certificate and
+tells you what to put in `pki.conf` if the default was wrong.
+
 Afterwards the root is only needed to re-sign the intermediate. Day-to-day
 issuance uses the intermediate and needs no PIN and no touch.
 
@@ -192,7 +203,7 @@ The root CA private key is in PIV slot 9c and never leaves the key.
 
 | Action | Needs |
 |---|---|
-| `yk-info`, `yk-slot`, `yk-retries`, `yk-export-cert` | nothing — safe to run anywhere |
+| `yk-info`, `yk-slot`, `yk-retries`, `yk-export-cert`, `yk-pkcs11` | nothing — safe to run anywhere |
 | `yk-test` | PIN + touch |
 | `yk-sign-intermediate [csr]` | PIN + touch — signs via the PKCS#11 engine |
 | `yk-change-pin`, `yk-change-puk`, `yk-unblock-pin`, `yk-change-mgmt` | PIN / PUK / mgmt key |

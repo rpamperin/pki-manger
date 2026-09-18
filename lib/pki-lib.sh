@@ -941,7 +941,7 @@ PKI_ACTIONS="status preflight renew deploy deploy-all trust-push trust-push-all 
 webmin-push-all webmin-fix webmin-fix-all ldap-fix ldap-fix-all samba-fix
 nextcloud-certcheck verify-tls logs issue issue-all trust-cleanup
 trust-cleanup-all yk-info yk-slot yk-export-cert yk-retries
-yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin
+yk-pkcs11 yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin
 yk-change-mgmt"
 
 # Refused in the web UI: these prompt for a PIN or need a physical touch.
@@ -1007,6 +1007,7 @@ pki_run_action() {
         yk-slot)             act_yk_slot "${arg:-$YUBIKEY_SLOT}" ;;
         yk-export-cert)      act_yk_export_cert "${arg:-$YUBIKEY_SLOT}" ;;
         yk-retries)          act_yk_retries ;;
+        yk-pkcs11)           act_yk_pkcs11 ;;
         yk-test)             act_yk_test "${arg:-$YUBIKEY_SLOT}" ;;
         yk-sign-intermediate) act_yk_sign_intermediate "$arg" ;;
         yk-change-pin)       act_yk_change_pin ;;
@@ -1124,6 +1125,7 @@ act_yk_sign_intermediate() {
     pki_yk_ready || return 1
     pki_tty_required "yk-sign-intermediate" || return 2
     pki_require_files "$csr" "$ROOT_CA_CRT" || return 1
+    pki_pkcs11_detect && pki_pkcs11_resolve_key "$YUBIKEY_SLOT" >/dev/null 2>&1
     if [ ! -r "$PKCS11_MODULE" ]; then
         pki_err "PKCS#11 module not found: $PKCS11_MODULE"
         pki_err "install opensc + libengine-pkcs11-openssl, or set PKCS11_MODULE in pki.conf"
@@ -1435,4 +1437,78 @@ act_preflight() {
         return 1
     fi
     printf '%sready%s\n' "$C_OK" "$C_RESET"
+}
+
+# ------------------------------------------------- PKCS#11 key discovery ----
+# OpenSC labels PIV slots "PIV AUTH key" (9a), "SIGN key" (9c), "KEY MAN key"
+# (9d), "CARD AUTH key" (9e), but labels vary by module and version. Getting
+# the URI wrong only shows up at signing time, after the key already exists,
+# so resolve it explicitly instead of hoping the default matches.
+
+pki_pkcs11_slot_id() {  # PIV slot -> PKCS#11 id
+    case "$1" in 9a) printf '01' ;; 9c) printf '02' ;; 9d) printf '03' ;; 9e) printf '04' ;; *) printf '02' ;; esac
+}
+
+# 0 if openssl can load a private key at this URI
+pki_pkcs11_key_works() {
+    local uri="$1"
+    case "$PKCS11_MODE" in
+        engine)
+            openssl pkey -engine pkcs11 -inform engine -in "$uri" -pubout -noout >/dev/null 2>&1 ;;
+        provider)
+            openssl pkey -provider pkcs11 -provider default -in "$uri" -pubout -noout >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Echoes a working URI for the slot, or nothing. Sets YK_ROOT_KEY_URI on success.
+pki_pkcs11_resolve_key() {
+    local slot="${1:-$YUBIKEY_SLOT}" id cand
+    id=$(pki_pkcs11_slot_id "$slot")
+
+    for cand in "$YK_ROOT_KEY_URI" \
+                "pkcs11:id=%${id};type=private" \
+                "pkcs11:object=SIGN%20key;type=private" \
+                "pkcs11:object=PIV%20AUTH%20key;type=private" \
+                "pkcs11:object=KEY%20MAN%20key;type=private" \
+                "pkcs11:slot-id=0;id=%${id};type=private"; do
+        [ -n "$cand" ] || continue
+        if pki_pkcs11_key_works "$cand"; then
+            YK_ROOT_KEY_URI="$cand"
+            printf '%s' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Read-only: show what the module exposes and whether the configured URI works.
+act_yk_pkcs11() {
+    pki_pkcs11_detect || { pki_pkcs11_hint; return 1; }
+    pki_info "== PKCS#11"
+    pki_info "   mode:   $PKCS11_MODE"
+    pki_info "   module: $PKCS11_MODULE"
+    pki_info "   uri:    $YK_ROOT_KEY_URI"
+    printf '\n'
+
+    if command -v pkcs11-tool >/dev/null 2>&1 && [ -r "$PKCS11_MODULE" ]; then
+        pki_info "-- objects on the token"
+        timeout 30 pkcs11-tool --module "$PKCS11_MODULE" -O 2>&1 \
+            | grep -iE 'object|label|ID:|Usage|type' | sed 's/^/   /' | head -40
+        printf '\n'
+    else
+        pki_warn "pkcs11-tool not installed (apt install opensc) - cannot list objects"
+    fi
+
+    pki_info "-- can openssl load a private key?"
+    local found
+    if found=$(pki_pkcs11_resolve_key "$YUBIKEY_SLOT"); then
+        if [ "$found" = "${YK_ROOT_KEY_URI_ORIG:-$found}" ]; then :; fi
+        pki_ok "usable key URI: $found"
+        [ "$found" = "$YK_ROOT_KEY_URI" ] || pki_warn "differs from pki.conf - set YK_ROOT_KEY_URI=\"$found\""
+    else
+        pki_err "no private key reachable for slot $YUBIKEY_SLOT"
+        pki_err "if the slot is empty this is expected until pki-init.sh generates the key"
+        return 1
+    fi
 }
