@@ -41,7 +41,11 @@ pki_apply_defaults() {
     # Stale anchor name that keeps reappearing in /etc/ldap/ldap.conf.
     STALE_CA_NAME="${STALE_CA_NAME:-pamperins-ca.crt}"
 
-    RENEW_SCRIPT="${RENEW_SCRIPT:-$PKI_ROOT/renew-certs.sh}"
+    if [ -z "${RENEW_SCRIPT:-}" ]; then
+        if [ -x "$PKI_APP_DIR/renew-certs.sh" ]; then RENEW_SCRIPT="$PKI_APP_DIR/renew-certs.sh"
+        else RENEW_SCRIPT="$PKI_ROOT/renew-certs.sh"; fi
+    fi
+    INIT_SCRIPT="${INIT_SCRIPT:-$PKI_APP_DIR/pki-init.sh}"
     MANAGER_LOG="${MANAGER_LOG:-$LOG_DIR/pki-manager.log}"
 
     WARN_DAYS="${WARN_DAYS:-30}"
@@ -71,6 +75,20 @@ pki_apply_defaults() {
     NEXTCLOUD_USER="${NEXTCLOUD_USER:-www-data}"
     NEXTCLOUD_PHP="${NEXTCLOUD_PHP:-php}"
     NEXTCLOUD_PROBE_URL="${NEXTCLOUD_PROBE_URL:-}"
+
+    # --- CA creation / issuance ---------------------------------------
+    ROOT_CA_SUBJECT="${ROOT_CA_SUBJECT:-/O=pamperins.lan/CN=Pamperins Root CA}"
+    INT_CA_SUBJECT="${INT_CA_SUBJECT:-/O=pamperins.lan/CN=Pamperins Intermediate CA}"
+    ROOT_CA_DAYS="${ROOT_CA_DAYS:-7300}"
+    LEAF_DAYS="${LEAF_DAYS:-397}"
+    RENEW_BEFORE_DAYS="${RENEW_BEFORE_DAYS:-30}"
+    KEY_ALGO="${KEY_ALGO:-rsa2048}"          # rsa2048 | rsa4096 | ecp256 | ecp384
+    YK_KEY_ALGO="${YK_KEY_ALGO:-RSA2048}"    # what the YubiKey generates in slot 9c
+    YK_PIN_POLICY="${YK_PIN_POLICY:-ONCE}"
+    YK_TOUCH_POLICY="${YK_TOUCH_POLICY:-ALWAYS}"
+    INT_CA_CSR="${INT_CA_CSR:-$INT_CA_DIR/$INT_CA_NAME.csr}"
+    INT_CA_KEY_PASS="${INT_CA_KEY_PASS:-}"   # empty = unencrypted (needed for unattended renewal)
+    CA_SERIAL="${CA_SERIAL:-$INT_CA_DIR/serial}"
 
     TECHNITIUM_SERVICE="${TECHNITIUM_SERVICE:-dns}"
     TECHNITIUM_USER="${TECHNITIUM_USER:-dns}"
@@ -202,6 +220,13 @@ pki_ssh_sudo() {
     else
         pki_ssh "$h" "sudo -n bash -c $(pki_shq "$snippet")"
     fi
+}
+
+# pki_scp_raw <host> <local> <remote> - upload only, no privilege step
+pki_scp_raw() {
+    pki_ssh_base "$1"
+    SSHPASS="$SSH_PASS" timeout "$CMD_TIMEOUT" \
+        "${SSH_WRAP[@]}" scp "${SCP_ARGS[@]}" "$2" "$SSH_TARGET:$3" >/dev/null
 }
 
 # pki_scp_to <host> <local> <remote-path> [mode] - stage, then install as root
@@ -595,28 +620,90 @@ act_renew() {
     fi
     pki_info "== renew: $RENEW_SCRIPT $*"
     mkdir -p "$LOG_DIR"
-    local log="$LOG_DIR/renew-$(date +%Y%m%d-%H%M%S).log"
-    if "$RENEW_SCRIPT" "$@" 2>&1 | tee "$log"; then
-        pki_ok "renewal finished (log: $log)"
+    # renew-certs.sh writes its own log into $LOG_DIR; don't duplicate it here
+    if "$RENEW_SCRIPT" "$@" 2>&1; then
+        pki_ok "renewal finished (logs in $LOG_DIR)"
     else
-        pki_err "renewal failed (log: $log)"
+        pki_err "renewal failed (see $LOG_DIR)"
         return 1
     fi
 }
 
 act_trust_push() {
-    local h="$1" dst="$TRUST_ANCHOR_DIR/$ROOT_CA_NAME.crt"
+    local h="$1" dst="$TRUST_ANCHOR_DIR/$ROOT_CA_NAME.crt" stage fp snippet
     pki_require_files "$ROOT_CA_CRT" || return 1
-    pki_info "== trust-push $h"
-    pki_scp_to "$h" "$ROOT_CA_CRT" "$dst" 0644 || return 1
-    if pki_ssh_sudo "$h" "command -v update-ca-certificates >/dev/null && update-ca-certificates || update-ca-trust extract"; then
-        pki_ok "root CA installed on $h: $dst"
+    fp=$(openssl x509 -in "$ROOT_CA_CRT" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+    pki_info "== trust-push $h  (root sha256 $fp)"
+
+    stage="/tmp/.pki-root-anchor.$$.crt"
+    if ! pki_scp_raw "$h" "$ROOT_CA_CRT" "$stage"; then
+        pki_err "upload of the root CA to $h failed"; return 1
+    fi
+
+    # Adding an anchor must never remove one: during a cutover the certs still
+    # in service are signed by the OLD root, and dropping it breaks LDAPS and
+    # Samba the moment they reconnect. A superseded anchor is kept alongside
+    # (still .crt, so still trusted) until trust-cleanup removes it.
+    snippet=$(cat <<EOS
+set -e
+dst=$(pki_shq "$dst"); stage=$(pki_shq "$stage"); newfp=$(pki_shq "$fp")
+mkdir -p $(pki_shq "$TRUST_ANCHOR_DIR")
+if [ -f "\$dst" ]; then
+    oldfp=\$(openssl x509 -in "\$dst" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+    if [ "\$oldfp" = "\$newfp" ]; then
+        echo "anchor already current"
     else
+        keep="$TRUST_ANCHOR_DIR/$ROOT_CA_NAME-superseded-\$(date +%Y%m%d-%H%M%S).crt"
+        cp -a "\$dst" "\$keep"
+        echo "previous anchor kept as \$keep (still trusted - remove with trust-cleanup)"
+    fi
+fi
+install -o root -g root -m 0644 "\$stage" "\$dst"
+rm -f "\$stage"
+if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates
+else update-ca-trust extract; fi
+EOS
+)
+    if ! pki_ssh_sudo "$h" "$snippet"; then
         pki_err "trust store update failed on $h"
+        pki_ssh "$h" "rm -f $(pki_shq "$stage")" >/dev/null 2>&1
         return 1
     fi
+
+    # prove the anchor really landed rather than trusting the exit code
+    if pki_ssh "$h" "openssl x509 -in $(pki_shq "$dst") -noout -fingerprint -sha256 2>/dev/null" 2>/dev/null \
+       | grep -q "$fp"; then
+        pki_ok "root CA trusted on $h: $dst"
+    else
+        pki_err "anchor on $h does not match the local root CA"
+        return 1
+    fi
+
     if pki_ssh "$h" "test -e $(pki_shq "$TRUST_ANCHOR_DIR/$STALE_CA_NAME")" 2>/dev/null; then
-        pki_warn "$h still has stale anchor $TRUST_ANCHOR_DIR/$STALE_CA_NAME (run ldap-fix / remove by hand)"
+        pki_warn "$h still has stale anchor $TRUST_ANCHOR_DIR/$STALE_CA_NAME (ldap-fix repoints ldap.conf)"
+    fi
+}
+
+# Remove anchors kept by trust-push. Run only once every service presents a
+# cert from the new root - verify-tls tells you when that is true.
+act_trust_cleanup() {
+    local h="$1" snippet
+    pki_info "== trust-cleanup $h"
+    snippet=$(cat <<EOS
+set -e
+n=\$(ls -1 $TRUST_ANCHOR_DIR/$ROOT_CA_NAME-superseded-*.crt 2>/dev/null | wc -l)
+if [ "\$n" = 0 ]; then echo "no superseded anchors"; exit 0; fi
+ls -1 $TRUST_ANCHOR_DIR/$ROOT_CA_NAME-superseded-*.crt
+rm -f $TRUST_ANCHOR_DIR/$ROOT_CA_NAME-superseded-*.crt
+if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates --fresh >/dev/null
+else update-ca-trust extract; fi
+echo "removed \$n superseded anchor(s)"
+EOS
+)
+    if pki_ssh_sudo "$h" "$snippet"; then
+        pki_ok "trust store tidied on $h"
+    else
+        pki_err "trust-cleanup failed on $h"; return 1
     fi
 }
 
@@ -848,7 +935,8 @@ act_logs() {
 
 PKI_ACTIONS="status renew deploy deploy-all trust-push trust-push-all webmin-push
 webmin-push-all webmin-fix webmin-fix-all ldap-fix ldap-fix-all samba-fix
-nextcloud-certcheck verify-tls logs yk-info yk-slot yk-export-cert yk-retries
+nextcloud-certcheck verify-tls logs issue issue-all trust-cleanup
+trust-cleanup-all yk-info yk-slot yk-export-cert yk-retries
 yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin
 yk-change-mgmt"
 
@@ -862,7 +950,7 @@ pki_run_action() {
     local action="$1" arg="${2:-}" h rc=0
     pki_action_valid "$action" || { pki_err "unknown action: $action"; return 2; }
     case "$action" in
-        deploy|trust-push|webmin-push|webmin-fix|ldap-fix|samba-fix)
+        deploy|trust-push|webmin-push|webmin-fix|ldap-fix|samba-fix|issue|trust-cleanup)
             pki_host_valid "$arg" || { pki_err "action $action needs a valid host ($HOSTS)"; return 2; } ;;
         nextcloud-certcheck)
             case "${arg:-auto}" in auto|enforce|bypass|on|off) ;; *) pki_err "bad mode: $arg"; return 2 ;; esac ;;
@@ -899,6 +987,10 @@ pki_run_action() {
         nextcloud-certcheck) act_nextcloud_certcheck "${arg:-auto}" ;;
         verify-tls)          act_verify_tls "$arg" ;;
         logs)                act_logs "$arg" ;;
+        issue)               pki_issue_cert "$arg" "$LEAF_DAYS" ;;
+        issue-all)           for h in $HOSTS; do pki_issue_cert "$h" "$LEAF_DAYS" || rc=1; done ;;
+        trust-cleanup)       act_trust_cleanup "$arg" ;;
+        trust-cleanup-all)   for h in $HOSTS; do act_trust_cleanup "$h" || rc=1; done ;;
         yk-info)             act_yk_info ;;
         yk-slot)             act_yk_slot "${arg:-$YUBIKEY_SLOT}" ;;
         yk-export-cert)      act_yk_export_cert "${arg:-$YUBIKEY_SLOT}" ;;
@@ -1058,3 +1150,158 @@ act_yk_change_pin()  { pki_yk_ready || return 1; pki_tty_required yk-change-pin 
 act_yk_change_puk()  { pki_yk_ready || return 1; pki_tty_required yk-change-puk  || return 2; pki_info "== change PIV PUK";  timeout 120 ykman piv access change-puk 2>&1 || timeout 120 ykman piv change-puk 2>&1; }
 act_yk_unblock_pin() { pki_yk_ready || return 1; pki_tty_required yk-unblock-pin || return 2; pki_info "== unblock PIN with PUK"; timeout 120 ykman piv access unblock-pin 2>&1 || timeout 120 ykman piv unblock-pin 2>&1; }
 act_yk_change_mgmt() { pki_yk_ready || return 1; pki_tty_required yk-change-mgmt || return 2; pki_info "== change management key"; timeout 120 ykman piv access change-management-key --touch 2>&1 || timeout 120 ykman piv change-management-key --touch 2>&1; }
+
+# =========================================================== CA creation ====
+# Root CA key is generated on the YubiKey and never leaves it. The intermediate
+# key lives on disk so routine renewals need no PIN and no touch: only root
+# operations require the hardware.
+
+# Sets PKCS11_MODE to engine | provider | none.
+pki_pkcs11_detect() {
+    PKCS11_MODE=none
+    if openssl engine pkcs11 >/dev/null 2>&1; then
+        PKCS11_MODE=engine
+    elif openssl list -providers 2>/dev/null | grep -qi 'pkcs11'; then
+        PKCS11_MODE=provider
+    fi
+    [ "$PKCS11_MODE" != none ]
+}
+
+pki_pkcs11_hint() {
+    pki_err "no PKCS#11 support in openssl - the YubiKey cannot sign"
+    pki_err "install one of:  apt install libengine-pkcs11-openssl opensc"
+    pki_err "             or: apt install pkcs11-provider opensc"
+}
+
+# Arg arrays for openssl. `req`/`ca` take -keyform, `x509 -req` takes -CAkeyform.
+pki_pkcs11_key_args() {
+    case "$PKCS11_MODE" in
+        engine)   PK11_KEY=(-engine pkcs11 -keyform engine) ;;
+        provider) PK11_KEY=(-provider pkcs11 -provider default) ;;
+        *)        PK11_KEY=() ;;
+    esac
+}
+pki_pkcs11_cakey_args() {
+    case "$PKCS11_MODE" in
+        engine)   PK11_CAKEY=(-engine pkcs11 -CAkeyform engine) ;;
+        provider) PK11_CAKEY=(-provider pkcs11 -provider default) ;;
+        *)        PK11_CAKEY=() ;;
+    esac
+}
+
+pki_genkey() {  # outfile [algo]
+    local out="$1" algo="${2:-$KEY_ALGO}"
+    mkdir -p "$(dirname "$out")"
+    case "$algo" in
+        rsa2048) openssl genrsa -out "$out" 2048 2>/dev/null ;;
+        rsa4096) openssl genrsa -out "$out" 4096 2>/dev/null ;;
+        ecp256)  openssl ecparam -name prime256v1 -genkey -noout -out "$out" 2>/dev/null ;;
+        ecp384)  openssl ecparam -name secp384r1 -genkey -noout -out "$out" 2>/dev/null ;;
+        *) pki_err "unknown KEY_ALGO: $algo"; return 1 ;;
+    esac || { pki_err "key generation failed: $out"; return 1; }
+    chmod 600 "$out"
+}
+
+# SAN list for a host: fqdn, short name, address, plus HOST_<h>_SANS extras.
+pki_host_sans() {
+    local h="$1" fqdn addr extra s sans v
+    fqdn=$(pki_host_fqdn "$h"); addr=$(pki_host_addr "$h")
+    sans="DNS:$fqdn,DNS:$h"
+    case "$addr" in
+        ''|*[!0-9.]*) ;;
+        *) sans="$sans,IP:$addr" ;;
+    esac
+    v="HOST_${h}_SANS"; extra="${!v:-}"
+    for s in $extra; do
+        case "$s" in
+            DNS:*|IP:*|email:*|URI:*) sans="$sans,$s" ;;
+            *[!0-9.]*)                sans="$sans,DNS:$s" ;;
+            *)                        sans="$sans,IP:$s" ;;
+        esac
+    done
+    printf '%s' "$sans"
+}
+
+pki_leaf_extfile() {  # host outfile
+    local h="$1" out="$2"
+    cat > "$out" <<EOX
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth,clientAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+subjectAltName=$(pki_host_sans "$h")
+EOX
+}
+
+pki_int_extfile() {  # outfile
+    cat > "$1" <<'EOX'
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign,digitalSignature
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always
+EOX
+}
+
+pki_passin_args() {  # populates PASSIN for the intermediate key
+    if [ -n "$INT_CA_KEY_PASS" ]; then
+        PKI_INT_PASS="$INT_CA_KEY_PASS"; export PKI_INT_PASS
+        PASSIN=(-passin env:PKI_INT_PASS)
+    else
+        PASSIN=()
+    fi
+}
+
+pki_next_serial() {
+    mkdir -p "$(dirname "$CA_SERIAL")"
+    [ -s "$CA_SERIAL" ] || printf '1000\n' > "$CA_SERIAL"
+    printf '%s' "$(cat "$CA_SERIAL")"
+}
+
+pki_verify_chain() {  # leaf-cert
+    openssl verify -CAfile "$ROOT_CA_CRT" -untrusted "$INT_CA_CRT" "$1" >/dev/null 2>&1
+}
+
+# Issue (or re-issue) the service cert for one host, signed by the intermediate.
+# No YubiKey and no PIN: this is the path automation uses.
+pki_issue_cert() {
+    local h="$1" days="${2:-$LEAF_DAYS}" rotate="${3:-0}"
+    local fqdn crt key csr ext
+    fqdn=$(pki_host_fqdn "$h")
+    crt=$(pki_host_cert "$h"); key=$(pki_host_key "$h")
+    csr="$CERT_DIR/$fqdn.csr"; ext=$(mktemp)
+
+    pki_require_files "$INT_CA_CRT" "$INT_CA_KEY" || { rm -f "$ext"; return 1; }
+    mkdir -p "$CERT_DIR"
+
+    if [ ! -s "$key" ] || [ "$rotate" = 1 ]; then
+        pki_info "-> new key ($KEY_ALGO): $key"
+        pki_genkey "$key" || { rm -f "$ext"; return 1; }
+    else
+        pki_info "-> reusing key: $key"
+    fi
+
+    if ! openssl req -new -key "$key" -subj "/CN=$fqdn" -out "$csr" 2>/dev/null; then
+        pki_err "CSR failed for $fqdn"; rm -f "$ext"; return 1
+    fi
+
+    pki_leaf_extfile "$h" "$ext"
+    pki_passin_args
+    [ -f "$crt" ] && cp -a "$crt" "$crt.bak.$(date +%Y%m%d-%H%M%S)"
+    if ! openssl x509 -req -sha256 -in "$csr" \
+            -CA "$INT_CA_CRT" -CAkey "$INT_CA_KEY" "${PASSIN[@]}" \
+            -CAserial "$CA_SERIAL" -CAcreateserial \
+            -days "$days" -extfile "$ext" -out "$crt" 2>/dev/null; then
+        pki_err "signing failed for $fqdn - check the intermediate key/passphrase"
+        rm -f "$ext"; return 1
+    fi
+    rm -f "$ext" "$csr"
+    chmod 644 "$crt"
+
+    if pki_verify_chain "$crt"; then
+        pki_ok "$fqdn issued, ${days}d, SAN: $(pki_host_sans "$h")"
+    else
+        pki_err "$fqdn issued but does NOT verify against the root - not deploying this"
+        return 1
+    fi
+}

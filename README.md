@@ -6,10 +6,14 @@ Both front ends call the same shell library (`lib/pki-lib.sh`), so a probe or a
 fix behaves identically whether you run it from the terminal or the browser.
 
 ```
-pki-manager.sh ─┐
-                ├─ lib/pki-lib.sh ─→ openssl / ssh / ykman / occ
-pki-web.py ─────┘   (probes + actions)
+pki-init.sh  ────┐   create the CA        (once, YubiKey, PIN + touch)
+renew-certs.sh ──┤
+pki-manager.sh ──┼─ lib/pki-lib.sh ─→ openssl / ssh / ykman / occ
+pki-web.py  ─────┘   (probes + actions)
 ```
+
+`pki-init.sh` builds the CA. `renew-certs.sh` issues and renews leaf certs and
+is safe for cron. The other two manage and deploy what those produce.
 
 ## Install
 
@@ -25,6 +29,43 @@ $EDITOR ~/pki/pki.conf
 
 Everything host- and credential-specific lives in `~/pki/pki.conf`. Nothing is
 hardcoded in the scripts. Override the location with `PKI_CONF=/path/to/conf`.
+
+## Starting from nothing
+
+If there is no CA yet, build one. Review the plan first — creating the root key
+on the YubiKey cannot be undone:
+
+```bash
+./pki-init.sh --dry-run     # prints every command, changes nothing
+./pki-init.sh               # asks for the PIV PIN and a touch
+```
+
+This generates the Root CA keypair **on the YubiKey** (slot 9c, never
+extractable), self-signs it with proper CA extensions, then creates an
+intermediate CA on disk signed by that root. It refuses to overwrite a slot
+that already holds a key, or an intermediate that already exists.
+
+Afterwards the root is only needed to re-sign the intermediate. Day-to-day
+issuance uses the intermediate and needs no PIN and no touch.
+
+### Cutover onto a live LAN
+
+Order matters. Trusting the new root is additive and safe; swapping certs is
+not. Do it in this order or LDAPS and Samba break mid-change:
+
+```bash
+./renew-certs.sh --force                    # 1. issue the new service certs
+./pki-manager.sh --run trust-push-all       # 2. trust the new root EVERYWHERE
+./pki-manager.sh --run verify-tls           #    confirm before touching certs
+./pki-manager.sh --run deploy-all           # 3. now swap the certs over
+./pki-manager.sh --run ldap-fix-all         # 4. repoint ldap.conf
+./pki-manager.sh --run trust-cleanup-all    # 5. only once everything is green
+```
+
+Step 2 never removes an anchor. If a host already has one at the same path,
+the old one is kept alongside as `*-superseded-<date>.crt` and stays trusted,
+so certs still in service keep validating. Step 5 removes those — run it only
+after `verify-tls` shows every endpoint on the new root.
 
 ## Use
 
@@ -58,13 +99,15 @@ Green / amber / red follow `WARN_DAYS` (30) and `CRIT_DAYS` (7).
 
 | Action | What it does |
 |---|---|
-| `renew` | runs `~/pki/renew-certs.sh` — that script stays the source of truth |
+| `renew` | runs `renew-certs.sh`, the source of truth for renewal logic |
+| `issue <host>` | re-issue one host's cert immediately, ignoring the renewal window |
 | `deploy <host>` | pushes certs for every role the host has, then restarts what needs it |
 | `trust-push <host>` | installs the root CA into the system trust store |
 | `webmin-push <host>` | writes **leaf + intermediate** to `miniserv.cert`, key to `miniserv.pem` |
 | `webmin-fix <host>` | repoints `miniserv.conf` at `/etc/webmin/` |
 | `ldap-fix <host>` | rewrites `TLS_CACERT` to `pamperins-root-ca.crt` |
 | `samba-fix <host>` | `chown root:root` on the Samba TLS dir, then restarts Samba |
+| `trust-cleanup <host>` | removes superseded root anchors once cutover is done |
 | `nextcloud-certcheck auto` | tests trust, then sets `turnOffCertCheck` to match |
 | `verify-tls [host]` | subject, issuer, expiry, chain length and verify result per endpoint |
 | `logs [n]` | tails the manager log and the last renewal logs |
@@ -84,6 +127,25 @@ probes when it finishes.
   repoints it and reports the old value.
 - **Nextcloud `turnOffCertCheck` drifts** — `auto` mode decides from a live
   fetch instead of guessing, so the bypass is on only while trust is broken.
+
+## Automating renewal
+
+`renew-certs.sh` signs with the intermediate only, so it needs no PIN, no touch
+and no YubiKey — it runs unattended. Renew weekly; anything due within
+`RENEW_BEFORE_DAYS` (30) gets reissued, everything else is skipped:
+
+```cron
+17 3 * * 1  cd /home/YOURUSER/pki-manger && ./renew-certs.sh && ./pki-manager.sh --run deploy-all
+```
+
+Check what it would do without changing anything:
+
+```bash
+./renew-certs.sh --list
+```
+
+Only root operations need the hardware: re-signing the intermediate when it
+nears expiry (`INT_CA_DAYS`, 5y by default), which is `yk-sign-intermediate`.
 
 ## YubiKey
 
