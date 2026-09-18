@@ -1464,6 +1464,32 @@ act_preflight() {
     printf '%sready%s\n' "$C_OK" "$C_RESET"
 }
 
+# Run a command, keep its output, and show it when it fails. Swallowing stderr
+# on a step that touches hardware turns every failure into a guess.
+pki_try() {  # description command...
+    local desc="$1"; shift
+    local out rc
+    out=$("$@" 2>&1); rc=$?
+    if [ $rc -ne 0 ]; then
+        pki_err "$desc failed (exit $rc)"
+        [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/       | /' >&2
+        return $rc
+    fi
+    [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/       | /'
+    return 0
+}
+
+# 0 if the slot holds a readable certificate (which is what makes a PKCS#11
+# module expose the slot's private key).
+pki_yk_slot_has_cert() {
+    local tmp rc=1
+    tmp=$(mktemp)
+    pki_yk_export_cert "${1:-$YUBIKEY_SLOT}" "$tmp" 2>/dev/null \
+        && [ -s "$tmp" ] && openssl x509 -in "$tmp" -noout >/dev/null 2>&1 && rc=0
+    rm -f "$tmp"
+    return $rc
+}
+
 # An explicit config beats relying on the system openssl.cnf defaults or on
 # -addext: both vary by distro and version, and a root CA that silently comes
 # out without basicConstraints is useless and hard to notice.
