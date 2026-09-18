@@ -85,9 +85,21 @@ else
 fi
 pki_pkcs11_key_args; pki_pkcs11_cakey_args
 
-if [ "$DRY" = 0 ] && ! timeout 15 ykman piv info >/dev/null 2>&1; then
-    pki_err "no YubiKey detected - plug it in"
-    exit 1
+if [ "$DRY" = 0 ]; then
+    YKOUT=$(timeout 15 ykman piv info 2>&1); YKRC=$?
+    if [ $YKRC -ne 0 ]; then
+        pki_err "cannot talk to the YubiKey (exit $YKRC)"
+        [ -n "$YKOUT" ] && printf '%s\n' "$YKOUT" | sed 's/^/       | /' >&2
+        case "$YKOUT" in
+            *[Pp]"C/SC"*|*pcscd*|*[Ss]mart[Cc]ard*|*"Failed to connect"*)
+                pki_err "this usually means the smartcard daemon is not running:"
+                pki_err "    sudo systemctl enable --now pcscd" ;;
+            *[Pp]ermission*|*[Aa]ccess*[Dd]enied*)
+                pki_err "permission problem reaching the device - check udev rules, or try sudo" ;;
+            *) pki_err "is the key plugged in?" ;;
+        esac
+        exit 1
+    fi
 fi
 
 # refuse to clobber an existing root key: it would orphan every cert under it
