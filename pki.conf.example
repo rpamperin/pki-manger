@@ -132,6 +132,9 @@ SSH_USER=root
 #
 # Seconds allowed for a ykman step that waits on a person typing or touching.
 #PIV_TIMEOUT=300
+# The same for storing the root cert in a slot, which is optional work, so it
+# waits less. A countdown bar is shown while it does.
+#PIV_IMPORT_TIMEOUT=120
 #PKCS11_MODULE=/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so
 #YK_ROOT_KEY_URI="pkcs11:object=SIGN%20key;type=private"
 #INT_CA_DAYS=1825

@@ -1163,7 +1163,8 @@ act_yk_import_root() {
     pki_info "== store $ROOT_CA_CRT in slot $slot"
     pki_warn "   $(pki_yk_mgmt_prompt_hint)"
     pki_warn "   then TOUCH THE KEY - it blinks without printing anything"
-    pki_run_tty "import root certificate" pki_yk_import_cert "$slot" "$ROOT_CA_CRT" || return 1
+    pki_run_tty_timed "import root certificate" "$PIV_IMPORT_TIMEOUT" \
+        pki_yk_import_cert "$slot" "$ROOT_CA_CRT" || return 1
     tmp=$(mktemp)
     if pki_yk_export_cert "$slot" "$tmp" && pki_cert_is_ca "$tmp"; then
         pki_ok "slot $slot now holds the root certificate (verified CA:TRUE)"
@@ -1548,6 +1549,45 @@ pki_run_tty() {
     local rc=$?
     pki_err "$desc failed (exit $rc) - see the output above"
     return $rc
+}
+
+# Draws a countdown while an interactive command waits. The grace period lets
+# a PIN be typed before anything is drawn over the prompt, and nothing is drawn
+# at all when stderr is not a terminal, so logs stay clean.
+pki_tick() {  # total-seconds [grace]
+    local secs="$1" grace="${2:-12}" i=0 w=24 filled left
+    local bar='########################'
+    local dots='........................'
+    [ -t 2 ] || return 0
+    while [ "$i" -lt "$secs" ]; do
+        sleep 1; i=$((i+1))
+        [ "$i" -lt "$grace" ] && continue
+        filled=$(( i * w / secs ))
+        [ "$filled" -gt "$w" ] && filled=$w
+        left=$((secs - i))
+        printf '\r   [%s%s] %3ds left - touch the key if it is blinking ' \
+            "${bar:0:$filled}" "${dots:0:$((w-filled))}" "$left" >&2
+    done
+}
+
+# pki_run_tty with a visible countdown. The command keeps the terminal, so its
+# prompts still work; the bar is drawn underneath from a background job.
+pki_run_tty_timed() {  # desc seconds command...
+    local desc="$1" secs="$2"; shift 2
+    local tick rc
+    pki_tick "$secs" & tick=$!
+    "$@"; rc=$?
+    kill "$tick" 2>/dev/null; wait "$tick" 2>/dev/null
+    [ -t 2 ] && printf '\r%*s\r' 70 '' >&2
+    if [ $rc -ne 0 ]; then
+        if [ $rc -eq 124 ]; then
+            pki_err "$desc timed out after ${secs}s"
+        else
+            pki_err "$desc failed (exit $rc) - see the output above"
+        fi
+        return $rc
+    fi
+    return 0
 }
 
 # ykman renamed the certificate subcommands between 4.x and 5.x. Detect once:

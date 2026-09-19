@@ -312,7 +312,7 @@ else
     pki_info "   writing the root certificate to slot $YUBIKEY_SLOT"
     pki_warn "   $(pki_yk_mgmt_prompt_hint)"
     pki_warn "   then TOUCH THE KEY - it blinks without printing anything"
-    pki_info "   if nothing happens, wait: this gives up after ${PIV_IMPORT_TIMEOUT}s and carries on"
+    pki_info "   a countdown appears below; it gives up after ${PIV_IMPORT_TIMEOUT}s and carries on"
     # Storing the certificate on the key is a convenience: the copy on disk is
     # what signs and what gets distributed, and the slot only needs *some*
     # certificate for PKCS#11 to expose the private key. So a failure here is
@@ -320,8 +320,8 @@ else
     SLOT_OK=0
     if [ "$SKIP_SLOT_IMPORT" = 1 ]; then
         pki_info "   skipped (--skip-slot-import)"
-    elif pki_run_tty "import root certificate into slot $YUBIKEY_SLOT" \
-            pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT"; then
+    elif pki_run_tty_timed "import root certificate into slot $YUBIKEY_SLOT" \
+            "$PIV_IMPORT_TIMEOUT" pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT"; then
         VERIFY=$(mktemp)
         if pki_yk_export_cert "$YUBIKEY_SLOT" "$VERIFY" && pki_cert_is_ca "$VERIFY"; then
             pki_ok "slot $YUBIKEY_SLOT now holds the real root certificate (verified CA:TRUE)"

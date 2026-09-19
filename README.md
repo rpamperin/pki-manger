@@ -84,7 +84,15 @@ tells you what to put in `pki.conf` if the default was wrong.
 
 Writing to a PIV slot can require a physical touch, and nothing on screen says
 so — the key just blinks. If a step stops right after you enter the PIN, touch
-the key.
+the key. A countdown bar appears while it waits, so you can see how long is
+left before it gives up:
+
+```
+   [##########..............]   68s left - touch the key if it is blinking
+```
+
+It starts a few seconds in, so it never draws over the PIN prompt, and it is
+suppressed when output is not a terminal.
 
 Storing the root certificate in the slot is a convenience, not a requirement:
 the copy under `root-ca/` is what signs and what gets distributed, and the slot
