@@ -145,6 +145,25 @@ If you would rather hold it yourself, set `YK_MGMT_KEY` in `pki.conf` or point
 management key as a command-line argument, so it is briefly visible in `ps`
 to local users while a slot write runs. `yk-protect-mgmt` has no such window.
 
+### How many times it asks for the PIN
+
+A full `pki-init.sh` run asks three times, and that is the minimum for a
+PIN-protected key:
+
+| Prompt | Purpose |
+|---|---|
+| `PIV PIN (hidden)` | resolves the key URI, then satisfies the token login for both signatures |
+| `Enter PKCS#11 key PIN` | root self-signature |
+| `Enter PKCS#11 key PIN` | intermediate signature |
+
+The last two are PIV's rule for slot 9C — a PIN check immediately before every
+signature. Removing the first would make it four, because openssl would then
+ask for the token PIN separately at each signing.
+
+This is a one-off. `renew-certs.sh` signs with the intermediate on disk and
+needs no PIN, no touch and no YubiKey at all; the key is only needed again to
+re-sign the intermediate, once every `INT_CA_DAYS` (five years by default).
+
 ### The PIN, and why slot 9C asks twice
 
 PIV defines slot 9C as the Digital Signature key and requires a PIN check

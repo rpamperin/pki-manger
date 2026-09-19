@@ -431,7 +431,9 @@ cat <<EOF
 
 ${C_HEAD}NEXT - order matters, your servers are live${C_RESET}
 
-  1. Issue the service certificates (no PIN needed):
+  The YubiKey is done - nothing below needs it, or a PIN, or a touch.
+
+  1. Issue the service certificates:
        ./renew-certs.sh --force
 
   2. Trust the new root EVERYWHERE before swapping any cert.
