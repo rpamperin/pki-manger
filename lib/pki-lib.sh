@@ -1550,6 +1550,52 @@ pki_piv_pin_prompt() {
            return 1 ;;
     esac
     PKI_PIV_PIN="$pin"; export PKI_PIV_PIN
+    pki_pin_file_init || { pki_err "could not stage the PIN file"; return 1; }
+}
+
+# PIV slot 9C is the Digital Signature key, and PIV requires a PIN check
+# immediately before every signature. OpenSC marks the key
+# CKA_ALWAYS_AUTHENTICATE, so libp11 performs a second, context-specific login
+# that -passin never reaches - it prompts again and fails with "Invalid PIN
+# length" when nothing answers. RFC 7512 pin-source satisfies both logins, and
+# a file keeps the PIN out of the process command line, unlike pin-value.
+# Must be called in the parent shell: creating it inside $( ) would leave the
+# path in a subshell, leaking a new file per call and defeating cleanup.
+pki_pin_file_init() {
+    [ -n "${PKI_PIV_PIN:-}" ] || return 1
+    [ -n "${PKI_PIN_FILE:-}" ] && [ -s "$PKI_PIN_FILE" ] && return 0
+    PKI_PIN_FILE=$(mktemp) || return 1
+    chmod 600 "$PKI_PIN_FILE"
+    printf '%s' "$PKI_PIV_PIN" > "$PKI_PIN_FILE"
+    export PKI_PIN_FILE
+}
+
+pki_pin_file_cleanup() {
+    [ -n "${PKI_PIN_FILE:-}" ] && rm -f "$PKI_PIN_FILE"
+    PKI_PIN_FILE=""
+    return 0
+}
+
+# base URI -> URI carrying the PIN, for the always-authenticate login
+pki_pkcs11_pin_uri() {   # read-only: safe to call inside $( )
+    local uri="$1"
+    { [ -n "${PKI_PIN_FILE:-}" ] && [ -s "$PKI_PIN_FILE" ]; } \
+        || { printf '%s' "$uri"; return 0; }
+    case "$uri" in
+        *\?*) printf '%s&pin-source=file:%s' "$uri" "$PKI_PIN_FILE" ;;
+        *)    printf '%s?pin-source=file:%s' "$uri" "$PKI_PIN_FILE" ;;
+    esac
+}
+
+# Same, using pin-value. Only as a fallback for libp11 builds that ignore
+# pin-source: this form is visible in ps, so it is never the first choice.
+pki_pkcs11_pinvalue_uri() {
+    local uri="$1"
+    [ -n "${PKI_PIV_PIN:-}" ] || { printf '%s' "$uri"; return 0; }
+    case "$uri" in
+        *\?*) printf '%s&pin-value=%s' "$uri" "$PKI_PIV_PIN" ;;
+        *)    printf '%s?pin-value=%s' "$uri" "$PKI_PIV_PIN" ;;
+    esac
 }
 
 pki_pkcs11_pass_args() {

@@ -44,6 +44,7 @@ while [ $# -gt 0 ]; do
 done
 
 pki_load_conf
+trap 'pki_pin_file_cleanup' EXIT INT TERM
 
 run() {  # echo in dry-run, execute otherwise
     if [ "$DRY" = 1 ]; then
@@ -250,7 +251,9 @@ if [ "$DRY" = 0 ]; then
     fi
 fi
 
-pki_info "   signing the real root certificate with the on-device key (touch required)"
+pki_info "   signing the real root certificate with the on-device key"
+pki_info "   slot $YUBIKEY_SLOT re-checks the PIN before every signature (PIV rule for 9C)"
+pki_warn "   TOUCH THE KEY when it starts blinking"
 CACNF="$ROOT_CA_DIR/root-ca.cnf"
 if [ "$DRY" = 1 ]; then
     run openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$YK_ROOT_KEY_URI" \
@@ -258,9 +261,21 @@ if [ "$DRY" = 1 ]; then
 else
     pki_root_ca_cnf "$CACNF" "$ROOT_CA_SUBJECT"
     pki_pkcs11_pass_args
-    if ! openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$YK_ROOT_KEY_URI" \
-            "${PK11_PASS[@]}" -config "$CACNF" -extensions v3_ca -days "$ROOT_CA_DAYS" \
-            -out "$ROOT_CA_CRT" 2>&1; then
+    sign_root() {  # $1 = key URI
+        openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$1" \
+            "${PK11_PASS[@]}" -config "$CACNF" -extensions v3_ca \
+            -days "$ROOT_CA_DAYS" -out "$ROOT_CA_CRT" 2>&1
+    }
+    SIGNED=0
+    if sign_root "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI")"; then
+        SIGNED=1
+    else
+        # Some libp11 builds ignore pin-source; pin-value always works but is
+        # visible in ps, so it is only tried after the safe form has failed.
+        pki_warn "pin-source was not honoured, retrying with pin-value"
+        sign_root "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && SIGNED=1
+    fi
+    if [ "$SIGNED" = 0 ]; then
         pki_err "self-signing failed - check YK_ROOT_KEY_URI ($YK_ROOT_KEY_URI) and PKCS11_MODULE"
         pki_err "PIN tries remaining: $(timeout 15 ykman piv info 2>/dev/null | sed -n 's/.*PIN tries remaining: *//p' | head -1)"
         pki_err "diagnose: ./pki-manager.sh --run yk-pkcs11"
@@ -313,12 +328,23 @@ else
         pki_err "intermediate CSR failed"; exit 1
     fi
     EXT=$(mktemp); pki_int_extfile "$EXT"
-    pki_info "   signing with the YubiKey root (PIN + touch)"
+    pki_info "   signing with the YubiKey root"
+    pki_warn "   TOUCH THE KEY when it starts blinking"
     pki_pkcs11_pass_args
-    if ! openssl x509 -req -sha256 "${PK11_CAKEY[@]}" -in "$INT_CA_CSR" \
-            -CA "$ROOT_CA_CRT" -CAkey "$YK_ROOT_KEY_URI" "${PK11_PASS[@]}" \
+    sign_int() {  # $1 = CA key URI
+        openssl x509 -req -sha256 "${PK11_CAKEY[@]}" -in "$INT_CA_CSR" \
+            -CA "$ROOT_CA_CRT" -CAkey "$1" "${PK11_PASS[@]}" \
             -CAcreateserial -days "$INT_CA_DAYS" -extfile "$EXT" \
-            -out "$INT_CA_CRT" 2>&1; then
+            -out "$INT_CA_CRT" 2>&1
+    }
+    INTSIGNED=0
+    if sign_int "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI")"; then
+        INTSIGNED=1
+    else
+        pki_warn "pin-source was not honoured, retrying with pin-value"
+        sign_int "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && INTSIGNED=1
+    fi
+    if [ "$INTSIGNED" = 0 ]; then
         rm -f "$EXT"; pki_err "intermediate signing failed"
         pki_err "retry without regenerating the key: ./pki-init.sh --reuse-slot --replace-ca"
         exit 1

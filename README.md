@@ -80,6 +80,28 @@ If anything fails after the key is generated, retry without regenerating it:
 time. Init resolves the URI itself as soon as the slot has a certificate and
 tells you what to put in `pki.conf` if the default was wrong.
 
+### The PIN, and why slot 9C asks twice
+
+PIV defines slot 9C as the Digital Signature key and requires a PIN check
+immediately before **every** signature. OpenSC marks the key
+`CKA_ALWAYS_AUTHENTICATE`, so libp11 performs a second, context-specific login
+that `-passin` does not reach — it prompts again, and an unanswered prompt
+surfaces as the unhelpful `Invalid PIN length`.
+
+Init therefore asks for the PIN once, checks the length locally (a PIV PIN is
+6–8 characters, and an impossible one is never sent to the card), and passes it
+through an RFC 7512 `pin-source` file at mode 600 so it stays out of `ps`. The
+PIN is held only in the process environment and a temporary file removed on
+exit — never written to `pki.conf`, never logged.
+
+A wrong PIN costs one of three tries before PIV blocks the key, so URI
+resolution stops the moment a PIN is rejected rather than spending the rest.
+Check the counter any time with:
+
+```bash
+./pki-manager.sh --run yk-retries
+```
+
 Afterwards the root is only needed to re-sign the intermediate. Day-to-day
 issuance uses the intermediate and needs no PIN and no touch.
 
