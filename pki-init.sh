@@ -286,7 +286,7 @@ fi
 
 pki_info "   signing the real root certificate with the on-device key"
 pki_info "   slot $YUBIKEY_SLOT re-checks the PIN before every signature (PIV rule for 9C)"
-pki_warn "   TOUCH THE KEY when it starts blinking"
+pki_info "   if the key starts blinking, touch it"
 CACNF="$ROOT_CA_DIR/root-ca.cnf"
 if [ "$DRY" = 1 ]; then
     run openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$YK_ROOT_KEY_URI" \
@@ -300,9 +300,11 @@ else
             -days "$ROOT_CA_DAYS" -out "$ROOT_CA_CRT" 2>&1
     }
     SIGNED=0
-    # The spinner keeps clear of any PIN prompt openssl shows first, and only
-    # appears if the signature is actually waiting on a touch.
-    pki_spin_start "signing root CA - touch the key if it blinks" 6
+    # No spinner here. This libp11 asks for the context-specific key PIN that
+    # PIV requires before each signature on 9C, and anything redrawing the
+    # line overwrites that prompt - leaving an empty PIN and a length error.
+    pki_warn "   openssl will ask: Enter PKCS#11 key PIN for SIGN key"
+    pki_warn "   type your PIV PIN there, then touch the key if it blinks"
     # Both pin-source spellings keep the PIN out of ps; pin-value does not,
     # so it is only reached when this libp11 build honours neither.
     if sign_root "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" file)"; then
@@ -315,7 +317,6 @@ else
         pki_warn "the PIN is briefly visible in ps while this signs"
         sign_root "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && SIGNED=1
     fi
-    pki_spin_stop
     if [ "$SIGNED" = 0 ]; then
         pki_err "self-signing failed - check YK_ROOT_KEY_URI ($YK_ROOT_KEY_URI) and PKCS11_MODULE"
         pki_err "PIN tries remaining: $(timeout 15 ykman piv info 2>/dev/null | sed -n 's/.*PIN tries remaining: *//p' | head -1)"
@@ -337,8 +338,8 @@ else
     # there. Without this a failed import leaves the throwaway cert in place
     # and everything downstream fails much later with a confusing error.
     pki_info "   writing the root certificate to slot $YUBIKEY_SLOT"
-    pki_warn "   $(pki_yk_mgmt_prompt_hint)"
-    pki_warn "   then TOUCH THE KEY - it blinks without printing anything"
+    pki_info "   $(pki_yk_mgmt_prompt_hint)"
+    pki_info "   no touch needed here - this writes a certificate, not a signature"
     pki_info "   a countdown appears below; it gives up after ${PIV_IMPORT_TIMEOUT}s and carries on"
     # Storing the certificate on the key is a convenience: the copy on disk is
     # what signs and what gets distributed, and the slot only needs *some*
@@ -382,7 +383,7 @@ else
     fi
     EXT=$(mktemp); pki_int_extfile "$EXT"
     pki_info "   signing with the YubiKey root"
-    pki_warn "   TOUCH THE KEY when it starts blinking"
+    pki_info "   if the key starts blinking, touch it"
     pki_pkcs11_pass_args
     sign_int() {  # $1 = CA key URI
         openssl x509 -req -sha256 "${PK11_CAKEY[@]}" -in "$INT_CA_CSR" \
@@ -391,7 +392,8 @@ else
             -out "$INT_CA_CRT" 2>&1
     }
     INTSIGNED=0
-    pki_spin_start "signing intermediate - touch the key if it blinks" 6
+    pki_warn "   openssl will ask: Enter PKCS#11 key PIN for SIGN key"
+    pki_warn "   type your PIV PIN there, then touch the key if it blinks"
     # Both pin-source spellings keep the PIN out of ps; pin-value does not,
     # so it is only reached when this libp11 build honours neither.
     if sign_int "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" file)"; then
@@ -404,7 +406,6 @@ else
         pki_warn "the PIN is briefly visible in ps while this signs"
         sign_int "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && INTSIGNED=1
     fi
-    pki_spin_stop
     if [ "$INTSIGNED" = 0 ]; then
         rm -f "$EXT"; pki_err "intermediate signing failed"
         pki_err "retry without regenerating the key: ./pki-init.sh --reuse-slot --replace-ca"

@@ -1097,13 +1097,19 @@ pki_yk_export_cert() {  # slot outfile
 pki_yk_import_cert() {  # slot infile
     local slot="$1" in="$2"
     pki_yk_mgmt_args
-    # PIV_TIMEOUT is generous: this prompts for the management key unless
-    # YK_MGMT_KEY is set, and a person has to type it.
+    # Importing a certificate is a management operation: it does not touch the
+    # private key, so no touch is required. It needs the management key, and
+    # when that is stored on the card ykman asks for the PIN to unwrap it.
+    # Hand it over directly rather than leaving a prompt to stall on.
+    local pinarg=()
+    [ -n "${PKI_PIV_PIN:-}" ] && [ "${YK_NO_PIN:-0}" != 1 ] && pinarg=(--pin "$PKI_PIV_PIN")
     local t="${PIV_IMPORT_TIMEOUT:-120}"
     if [ "$(pki_yk_cert_api)" = new ]; then
-        timeout "$t" ykman piv certificates import "${YK_MGMT[@]}" "$slot" "$in"
+        timeout "$t" ykman piv certificates import "${YK_MGMT[@]}" "${pinarg[@]}" "$slot" "$in" \
+        || timeout "$t" ykman piv certificates import "${YK_MGMT[@]}" "$slot" "$in"
     else
-        timeout "$t" ykman piv import-certificate "${YK_MGMT[@]}" "$slot" "$in"
+        timeout "$t" ykman piv import-certificate "${YK_MGMT[@]}" "${pinarg[@]}" "$slot" "$in" \
+        || timeout "$t" ykman piv import-certificate "${YK_MGMT[@]}" "$slot" "$in"
     fi
 }
 
@@ -1190,8 +1196,7 @@ act_yk_import_root() {
         return 1
     fi
     pki_info "== store $ROOT_CA_CRT in slot $slot"
-    pki_warn "   $(pki_yk_mgmt_prompt_hint)"
-    pki_warn "   then TOUCH THE KEY - it blinks without printing anything"
+    pki_info "   $(pki_yk_mgmt_prompt_hint)"
     pki_run_tty_timed "import root certificate" "$PIV_IMPORT_TIMEOUT" \
         pki_yk_import_cert "$slot" "$ROOT_CA_CRT" || return 1
     tmp=$(mktemp)
@@ -1614,8 +1619,13 @@ pki_progress() {
 # several hosts under one heading.
 pki_progress_label() { pki_progress "$PKI_PROG_CUR" "$PKI_PROG_TOT" "$1"; }
 
-# Spinner with elapsed seconds, for work with no predictable duration. The
-# grace period keeps it clear of any prompt the command shows first.
+# Spinner with elapsed seconds, for work with no predictable duration.
+#
+# NEVER wrap a command that prompts. The spinner redraws the line with \r, so
+# it overwrites the prompt: the user sees a spinner, types nothing, and the
+# command reads an empty answer. A grace period is not enough, because a
+# prompt can be answered slowly or appear more than once.
+# Use it only where nothing reads from the terminal.
 pki_spin_start() {  # label [grace-seconds]
     PKI_SPIN_LABEL="$1"; PKI_SPIN_PID=""
     [ -t 2 ] || return 0
