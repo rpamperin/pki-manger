@@ -1717,13 +1717,20 @@ pki_pin_file_cleanup() {
 }
 
 # base URI -> URI carrying the PIN, for the always-authenticate login
+# $2 selects the pin-source spelling: "file" (RFC 7512) or "path" (bare path,
+# which some libp11 builds expect instead). Both keep the PIN off the command
+# line, unlike pin-value.
 pki_pkcs11_pin_uri() {   # read-only: safe to call inside $( )
-    local uri="$1"
+    local uri="$1" form="${2:-file}" val
     { [ -n "${PKI_PIN_FILE:-}" ] && [ -s "$PKI_PIN_FILE" ]; } \
         || { printf '%s' "$uri"; return 0; }
+    case "$form" in
+        path) val="$PKI_PIN_FILE" ;;
+        *)    val="file:$PKI_PIN_FILE" ;;
+    esac
     case "$uri" in
-        *\?*) printf '%s&pin-source=file:%s' "$uri" "$PKI_PIN_FILE" ;;
-        *)    printf '%s?pin-source=file:%s' "$uri" "$PKI_PIN_FILE" ;;
+        *\?*) printf '%s&pin-source=%s' "$uri" "$val" ;;
+        *)    printf '%s?pin-source=%s' "$uri" "$val" ;;
     esac
 }
 

@@ -273,12 +273,16 @@ else
             -days "$ROOT_CA_DAYS" -out "$ROOT_CA_CRT" 2>&1
     }
     SIGNED=0
-    if sign_root "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI")"; then
+    # Both pin-source spellings keep the PIN out of ps; pin-value does not,
+    # so it is only reached when this libp11 build honours neither.
+    if sign_root "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" file)"; then
         SIGNED=1
+    elif sign_root "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" path)"; then
+        SIGNED=1
+        pki_info "   this libp11 wants pin-source without the file: prefix"
     else
-        # Some libp11 builds ignore pin-source; pin-value always works but is
-        # visible in ps, so it is only tried after the safe form has failed.
-        pki_warn "pin-source was not honoured, retrying with pin-value"
+        pki_warn "neither pin-source form was honoured, falling back to pin-value"
+        pki_warn "the PIN is briefly visible in ps while this signs"
         sign_root "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && SIGNED=1
     fi
     if [ "$SIGNED" = 0 ]; then
@@ -346,10 +350,16 @@ else
             -out "$INT_CA_CRT" 2>&1
     }
     INTSIGNED=0
-    if sign_int "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI")"; then
+    # Both pin-source spellings keep the PIN out of ps; pin-value does not,
+    # so it is only reached when this libp11 build honours neither.
+    if sign_int "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" file)"; then
         INTSIGNED=1
+    elif sign_int "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" path)"; then
+        INTSIGNED=1
+        pki_info "   this libp11 wants pin-source without the file: prefix"
     else
-        pki_warn "pin-source was not honoured, retrying with pin-value"
+        pki_warn "neither pin-source form was honoured, falling back to pin-value"
+        pki_warn "the PIN is briefly visible in ps while this signs"
         sign_int "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && INTSIGNED=1
     fi
     if [ "$INTSIGNED" = 0 ]; then
