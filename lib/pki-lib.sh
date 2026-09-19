@@ -1603,9 +1603,14 @@ act_yk_protect_mgmt() {
     pki_info "   after this nothing needs YK_MGMT_KEY or YK_MGMT_KEY_FILE"
     pki_warn "   you will be asked for the CURRENT management key (enter = factory default)"
     pki_yk_mgmt_args || return 1
+    pki_warn "   ykman prints the generated key below - it is ALREADY stored on the"
+    pki_warn "   YubiKey, so do not copy it anywhere. Anyone holding it can rewrite"
+    pki_warn "   the slots of that key without the PIN."
     if pki_run_tty "protect management key" timeout "$PIV_TIMEOUT" \
          ykman piv access change-management-key "${YK_MGMT[@]}" --protect --generate; then
         pki_ok "management key is now stored on the key and unlocked by the PIN"
+        pki_warn "the value printed above is a credential and is now in your scrollback."
+        pki_warn "if it was copied, pasted or logged anywhere, run this again to replace it."
         [ -n "${YK_MGMT_KEY:-}${YK_MGMT_KEY_FILE:-}" ] \
             && pki_warn "remove YK_MGMT_KEY / YK_MGMT_KEY_FILE from pki.conf - they are now stale"
     else
