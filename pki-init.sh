@@ -142,6 +142,7 @@ if [ "$INT_ONLY" = 1 ]; then
     pki_ok "root CA present: $(openssl x509 -in "$ROOT_CA_CRT" -noout -subject | sed 's/subject=*//')"
     pki_ok "valid $(pki_cert_days "$ROOT_CA_CRT")d, CA:TRUE"
     if [ "$DRY" = 0 ]; then
+        pki_piv_pin_prompt || exit 1
         if RESOLVED=$(pki_pkcs11_resolve_key "$YUBIKEY_SLOT"); then
             YK_ROOT_KEY_URI="$RESOLVED"
             pki_ok "PKCS#11 key URI: $RESOLVED"
@@ -223,6 +224,14 @@ else
     pki_warn "slot now holds a THROWAWAY certificate - not a CA, replaced in the next step"
 fi
 
+# One PIN prompt for the whole run. openssl would otherwise ask separately for
+# the token PIN and the key PIN, and once more per URI probed, which is how a
+# mistyped entry slips in - and every attempt that reaches the card costs one
+# of three tries.
+if [ "$DRY" = 0 ]; then
+    pki_piv_pin_prompt || exit 1
+fi
+
 # The module only exposes the key now that the slot holds a certificate, so
 # this is the first moment the URI can be checked. Doing it here means a wrong
 # URI is reported before it can waste the key.
@@ -248,10 +257,12 @@ if [ "$DRY" = 1 ]; then
         -config "$CACNF" -extensions v3_ca -days "$ROOT_CA_DAYS" -out "$ROOT_CA_CRT"
 else
     pki_root_ca_cnf "$CACNF" "$ROOT_CA_SUBJECT"
+    pki_pkcs11_pass_args
     if ! openssl req -x509 -new -sha256 "${PK11_KEY[@]}" -key "$YK_ROOT_KEY_URI" \
-            -config "$CACNF" -extensions v3_ca -days "$ROOT_CA_DAYS" \
+            "${PK11_PASS[@]}" -config "$CACNF" -extensions v3_ca -days "$ROOT_CA_DAYS" \
             -out "$ROOT_CA_CRT" 2>&1; then
         pki_err "self-signing failed - check YK_ROOT_KEY_URI ($YK_ROOT_KEY_URI) and PKCS11_MODULE"
+        pki_err "PIN tries remaining: $(timeout 15 ykman piv info 2>/dev/null | sed -n 's/.*PIN tries remaining: *//p' | head -1)"
         pki_err "diagnose: ./pki-manager.sh --run yk-pkcs11"
         pki_err "retry without regenerating the key: ./pki-init.sh --reuse-slot"
         pki_err "NOTE: slot $YUBIKEY_SLOT still holds the throwaway bootstrap certificate,"
@@ -303,8 +314,9 @@ else
     fi
     EXT=$(mktemp); pki_int_extfile "$EXT"
     pki_info "   signing with the YubiKey root (PIN + touch)"
+    pki_pkcs11_pass_args
     if ! openssl x509 -req -sha256 "${PK11_CAKEY[@]}" -in "$INT_CA_CSR" \
-            -CA "$ROOT_CA_CRT" -CAkey "$YK_ROOT_KEY_URI" \
+            -CA "$ROOT_CA_CRT" -CAkey "$YK_ROOT_KEY_URI" "${PK11_PASS[@]}" \
             -CAcreateserial -days "$INT_CA_DAYS" -extfile "$EXT" \
             -out "$INT_CA_CRT" 2>&1; then
         rm -f "$EXT"; pki_err "intermediate signing failed"

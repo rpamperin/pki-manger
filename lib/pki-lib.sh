@@ -1523,21 +1523,64 @@ pki_pkcs11_slot_id() {  # PIV slot -> PKCS#11 id
     case "$1" in 9a) printf '01' ;; 9c) printf '02' ;; 9d) printf '03' ;; 9e) printf '04' ;; *) printf '02' ;; esac
 }
 
-# 0 if openssl can load a private key at this URI
+# Ask for the PIV PIN once and keep it for the rest of the run. Never stored,
+# never written to pki.conf - it lives only in this process's environment.
+# The length is checked here because libp11 reports a bad length as an opaque
+# "Invalid PIN length" after the prompt, and because every attempt that
+# reaches the card costs one of three tries before the key is blocked.
+pki_piv_pin_prompt() {
+    [ -n "${PKI_PIV_PIN:-}" ] && return 0
+    pki_tty_required "PIN entry" || return 1
+    local pin tries
+    tries=$(timeout 15 ykman piv info 2>/dev/null | sed -n 's/.*PIN tries remaining: *//p' | head -1)
+    case "${tries%%/*}" in
+        0) pki_err "the PIV PIN is blocked - unblock it first:"
+           pki_err "    ./pki-manager.sh --run yk-unblock-pin"
+           return 1 ;;
+        1) pki_warn "only ONE PIN attempt remains - a wrong entry blocks the key" ;;
+        '') ;;
+        *) pki_info "PIV PIN tries remaining: $tries" ;;
+    esac
+    printf '%sPIV PIN (6-8 characters, hidden): %s' "$C_BOLD" "$C_RESET" >&2
+    read -rs pin; printf '\n' >&2
+    case ${#pin} in
+        6|7|8) ;;
+        0) pki_err "no PIN entered"; return 1 ;;
+        *) pki_err "a PIV PIN is 6-8 characters, you entered ${#pin} - not sent to the key"
+           return 1 ;;
+    esac
+    PKI_PIV_PIN="$pin"; export PKI_PIV_PIN
+}
+
+pki_pkcs11_pass_args() {
+    PK11_PASS=()
+    [ -n "${PKI_PIV_PIN:-}" ] && PK11_PASS=(-passin env:PKI_PIV_PIN)
+}
+
+# 0 = key loads, 1 = not found, 2 = PIN problem (caller must stop immediately)
 pki_pkcs11_key_works() {
-    local uri="$1"
+    local uri="$1" out rc
+    pki_pkcs11_pass_args
     case "$PKCS11_MODE" in
         engine)
-            openssl pkey -engine pkcs11 -inform engine -in "$uri" -pubout -noout >/dev/null 2>&1 ;;
+            out=$(openssl pkey -engine pkcs11 -inform engine -in "$uri" \
+                  "${PK11_PASS[@]}" -pubout -noout 2>&1); rc=$? ;;
         provider)
-            openssl pkey -provider pkcs11 -provider default -in "$uri" -pubout -noout >/dev/null 2>&1 ;;
+            out=$(openssl pkey -provider pkcs11 -provider default -in "$uri" \
+                  "${PK11_PASS[@]}" -pubout -noout 2>&1); rc=$? ;;
         *) return 1 ;;
     esac
+    PKI_PKCS11_LAST_ERR="$out"
+    [ $rc -eq 0 ] && return 0
+    case "$out" in
+        *"Invalid PIN"*|*CKR_PIN*|*"PIN incorrect"*|*"PIN locked"*|*"pin locked"*) return 2 ;;
+    esac
+    return 1
 }
 
 # Echoes a working URI for the slot, or nothing. Sets YK_ROOT_KEY_URI on success.
 pki_pkcs11_resolve_key() {
-    local slot="${1:-$YUBIKEY_SLOT}" id cand
+    local slot="${1:-$YUBIKEY_SLOT}" id cand rc
     id=$(pki_pkcs11_slot_id "$slot")
 
     for cand in "$YK_ROOT_KEY_URI" \
@@ -1547,11 +1590,16 @@ pki_pkcs11_resolve_key() {
                 "pkcs11:object=KEY%20MAN%20key;type=private" \
                 "pkcs11:slot-id=0;id=%${id};type=private"; do
         [ -n "$cand" ] || continue
-        if pki_pkcs11_key_works "$cand"; then
-            YK_ROOT_KEY_URI="$cand"
-            printf '%s' "$cand"
-            return 0
-        fi
+        pki_pkcs11_key_works "$cand"; rc=$?
+        case $rc in
+            0)  YK_ROOT_KEY_URI="$cand"; printf '%s' "$cand"; return 0 ;;
+            2)  # a wrong PIN costs one of three tries - stop before the rest
+                pki_err "the PIV PIN was rejected - stopping so no further attempts are used" >&2
+                [ -n "${PKI_PKCS11_LAST_ERR:-}" ] \
+                    && printf '%s\n' "$PKI_PKCS11_LAST_ERR" | sed 's/^/       | /' >&2
+                pki_err "check remaining tries:  ./pki-manager.sh --run yk-retries" >&2
+                return 2 ;;
+        esac
     done
     return 1
 }
