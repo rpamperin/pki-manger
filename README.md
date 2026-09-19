@@ -30,6 +30,28 @@ $EDITOR ~/pki/pki.conf
 Everything host- and credential-specific lives in `~/pki/pki.conf`. Nothing is
 hardcoded in the scripts. Override the location with `PKI_CONF=/path/to/conf`.
 
+## Settings menu
+
+Rather than editing `pki.conf` by hand:
+
+```bash
+./pki-manager.sh          # then press s
+./pki-manager.sh --run settings
+```
+
+It sets the SSH user, key file, password, sudo password, port and per-host
+addresses, and can test ssh-plus-root against every host so you find out
+straight away whether the credentials work.
+
+Everything is written to `$PKI_CONF` (`~/pki/pki.conf` by default), which stays
+mode 600. Passwords are typed hidden and shown back only as `******** (set)`;
+enter `-` to clear one. Because secrets are typed, the menu is terminal-only
+and is not reachable from the web UI.
+
+Note that a `pki.conf` sitting next to the scripts is **not** read — the
+scripts use `$PKI_CONF`. Editing the wrong copy is easy and silent, so the
+dashboard and preflight now warn when a stray one exists.
+
 ## SSH access
 
 Every remote action runs over ssh as `SSH_USER` (default `root`) and needs

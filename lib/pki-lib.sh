@@ -308,6 +308,16 @@ pki_days_state() {
 
 pki_rec() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"; }
 
+# A pki.conf sitting next to the scripts is a natural place to put one, and is
+# silently ignored: the scripts read $PKI_CONF (~/pki/pki.conf by default).
+# Edits made there do nothing, which is invisible without saying so.
+pki_probe_stray_conf() {
+    local stray="$PKI_APP_DIR/pki.conf"
+    [ -f "$stray" ] || return 0
+    [ "$stray" = "$PKI_CONF" ] && return 0
+    pki_rec conf stray-conf warn "ignored" "$stray is not read - the live config is $PKI_CONF"
+}
+
 pki_probe_conf() {
     if [ "$PKI_CONF_LOADED" = 1 ]; then
         case "$PKI_CONF_PERM" in
@@ -552,7 +562,7 @@ PKI_SECTIONS="conf yubikey cert server ldaps webmin nextcloud"
 
 pki_collect_status() {
     local n=0 tot=7
-    pki_progress $n $tot "config";     pki_probe_conf;      n=$((n+1))
+    pki_progress $n $tot "config";     pki_probe_conf; pki_probe_stray_conf; n=$((n+1))
     pki_progress $n $tot "yubikey";    pki_probe_yubikey;   n=$((n+1))
     pki_progress $n $tot "certs";      pki_probe_certs;     n=$((n+1))
     pki_progress $n $tot "servers";    pki_probe_servers;   n=$((n+1))
@@ -972,7 +982,7 @@ act_logs() {
 # ------------------------------------------------------------ dispatcher ----
 # Single validated entry point. The web UI never builds a command line.
 
-PKI_ACTIONS="status preflight renew deploy deploy-all trust-push trust-push-all webmin-push
+PKI_ACTIONS="status preflight settings renew deploy deploy-all trust-push trust-push-all webmin-push
 webmin-push-all webmin-fix webmin-fix-all ldap-fix ldap-fix-all samba-fix
 nextcloud-certcheck verify-tls logs issue issue-all trust-cleanup
 trust-cleanup-all yk-info yk-slot yk-export-cert yk-retries
@@ -980,7 +990,7 @@ yk-pkcs11 yk-protect-mgmt yk-import-root yk-test yk-sign-intermediate yk-change-
 yk-change-mgmt"
 
 # Refused in the web UI: these prompt for a PIN or need a physical touch.
-PKI_TTY_ACTIONS="yk-import-root yk-protect-mgmt yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin yk-change-mgmt"
+PKI_TTY_ACTIONS="settings yk-import-root yk-protect-mgmt yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin yk-change-mgmt"
 pki_action_is_tty() { case " $PKI_TTY_ACTIONS " in *" $1 "*) return 0 ;; esac; return 1; }
 
 pki_action_valid() { case " $(printf '%s' "$PKI_ACTIONS" | tr '\n' ' ') " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -1039,6 +1049,7 @@ pki_run_action() {
     case "$action" in
         status)              pki_collect_status | pki_render_text ;;
         preflight)           act_preflight ;;
+        settings)            act_settings ;;
         renew)               act_renew ;;
         deploy)              act_deploy "$arg" ;;
         deploy-all)          pki_each_host act_deploy || rc=1 ;;
@@ -1489,6 +1500,10 @@ act_preflight() {
         esac
     else
         mark fail "no pki.conf at $PKI_CONF" "cp pki.conf.example $PKI_CONF && chmod 600 $PKI_CONF"
+    fi
+    if [ -f "$PKI_APP_DIR/pki.conf" ] && [ "$PKI_APP_DIR/pki.conf" != "$PKI_CONF" ]; then
+        mark warn "$PKI_APP_DIR/pki.conf is ignored" \
+            "edits there do nothing - the live config is $PKI_CONF"
     fi
 
     printf '\n%sTOOLS%s\n' "$C_HEAD" "$C_RESET"
@@ -2008,4 +2023,118 @@ act_yk_pkcs11() {
         pki_err "if the slot is empty this is expected until pki-init.sh generates the key"
         return 1
     fi
+}
+
+# ========================================================== settings ========
+# Edit pki.conf from the TUI. Writes only to $PKI_CONF, keeps it mode 600, and
+# never echoes a secret. TTY-only: passwords are typed, so it is not reachable
+# from the web UI.
+
+# Update or append one key in pki.conf, preserving everything else. The value
+# is single-quoted so it survives being sourced.
+pki_conf_set() {  # key value
+    local key="$1" val="$2" f="${PKI_CONF:-}" tmp q
+    case "$key" in
+        ''|*[!A-Za-z0-9_]*) pki_err "bad config key: $key"; return 1 ;;
+    esac
+    [ -n "$f" ] || { pki_err "no pki.conf path known"; return 1; }
+    if [ ! -f "$f" ]; then
+        mkdir -p "$(dirname "$f")" || return 1
+        : > "$f" || return 1
+        chmod 600 "$f"
+    fi
+    q=$(pki_shq "$val")
+    tmp=$(mktemp) || return 1
+    chmod 600 "$tmp"
+    PKI_SET_K="$key" PKI_SET_V="$q" awk '
+        BEGIN { k = ENVIRON["PKI_SET_K"]; v = ENVIRON["PKI_SET_V"]; done = 0 }
+        !done && $0 ~ ("^[[:space:]]*#?[[:space:]]*" k "=") { print k "=" v; done = 1; next }
+        { print }
+        END { if (!done) print k "=" v }
+    ' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+    cat "$tmp" > "$f"          # rewrite in place, keeping inode and mode
+    rm -f "$tmp"
+    chmod 600 "$f"
+}
+
+pki_mask() {  # never print a secret back to the screen
+    [ -n "$1" ] && printf '******** (set)' || printf 'not set'
+}
+
+pki_ask() {  # prompt current -> echoes the new value, blank keeps current
+    local prompt="$1" cur="$2" ans
+    printf '%s [%s]: ' "$prompt" "${cur:-none}" >&2
+    read -r ans || return 1
+    [ -z "$ans" ] && { printf '%s' "$cur"; return 0; }
+    printf '%s' "$ans"
+}
+
+pki_ask_secret() {  # prompt -> echoes the new secret, blank keeps current
+    local prompt="$1" cur="$2" ans
+    printf '%s [%s, blank keeps it, "-" clears]: ' "$prompt" "$(pki_mask "$cur")" >&2
+    read -rs ans; printf '\n' >&2
+    case "$ans" in
+        '') printf '%s' "$cur" ;;
+        -)  printf '' ;;
+        *)  printf '%s' "$ans" ;;
+    esac
+}
+
+act_settings() {
+    pki_tty_required settings || return 2
+    local choice h addr v
+    while true; do
+        printf '\n%sSETTINGS%s  %s\n' "$C_HEAD" "$C_RESET" "$PKI_CONF"
+        printf '   1  SSH user            %s\n' "${SSH_USER:-root}"
+        printf '   2  SSH key file        %s\n' "${SSH_KEY:-not set}"
+        printf '   3  SSH password        %s  %s(needs sshpass; a key is better)%s\n' \
+            "$(pki_mask "${SSH_PASS:-}")" "$C_DIM" "$C_RESET"
+        printf '   4  sudo password       %s  %s(only if %s lacks passwordless sudo)%s\n' \
+            "$(pki_mask "${SUDO_PASS:-}")" "$C_DIM" "${SSH_USER:-root}" "$C_RESET"
+        printf '   5  SSH port            %s\n' "${SSH_PORT:-22}"
+        printf '   6  Host addresses      '
+        for h in $HOSTS; do printf '%s=%s ' "$h" "$(pki_host_addr "$h")"; done; printf '\n'
+        printf '   7  Test connections\n'
+        printf '   c  back\n'
+        printf '%ssettings>%s ' "$C_BOLD" "$C_RESET"
+        read -r choice || return 0
+        case "$choice" in
+            1) v=$(pki_ask "SSH user" "${SSH_USER:-root}") && pki_conf_set SSH_USER "$v" && SSH_USER="$v" ;;
+            2) v=$(pki_ask "SSH key file (path)" "${SSH_KEY:-}") && pki_conf_set SSH_KEY "$v" && SSH_KEY="$v" ;;
+            3) if ! command -v sshpass >/dev/null 2>&1; then
+                   pki_warn "sshpass is not installed - a password will not be used"
+                   pki_warn "install it (apt install sshpass) or use an SSH key instead"
+               fi
+               v=$(pki_ask_secret "SSH password" "${SSH_PASS:-}")
+               pki_conf_set SSH_PASS "$v" && SSH_PASS="$v"
+               pki_ok "saved to $PKI_CONF (mode 600)" ;;
+            4) v=$(pki_ask_secret "sudo password" "${SUDO_PASS:-}")
+               pki_conf_set SUDO_PASS "$v" && SUDO_PASS="$v"
+               pki_ok "saved to $PKI_CONF (mode 600)" ;;
+            5) v=$(pki_ask "SSH port" "${SSH_PORT:-22}")
+               case "$v" in ''|*[!0-9]*) pki_err "port must be a number" ;;
+                            *) pki_conf_set SSH_PORT "$v" && SSH_PORT="$v" ;; esac ;;
+            6) for h in $HOSTS; do
+                   addr=$(pki_ask "  address for $h" "$(pki_host_addr "$h")") || break
+                   pki_conf_set "HOST_${h}_ADDR" "$addr"
+                   eval "HOST_${h}_ADDR=\$addr"
+               done ;;
+            7) for h in $HOSTS; do
+                   printf '   %-10s %-15s ' "$h" "$(pki_host_addr "$h")"
+                   case "$(pki_ssh_probe "$h")" in
+                       ok)      printf '%sssh ok%s' "$C_OK" "$C_RESET"
+                                pki_ssh_sudo "$h" true >/dev/null 2>&1 \
+                                    && printf ' %s+ root%s\n' "$C_OK" "$C_RESET" \
+                                    || printf ' %s- no root%s\n' "$C_WARN" "$C_RESET" ;;
+                       auth)    printf '%sauth refused for %s%s\n' "$C_ERR" "${SSH_USER:-root}" "$C_RESET" ;;
+                       closed)  printf '%sport %s closed / host unreachable%s\n' "$C_ERR" "${SSH_PORT:-22}" "$C_RESET" ;;
+                       hostkey) printf '%shost key changed%s\n' "$C_ERR" "$C_RESET" ;;
+                       timeout) printf '%stimed out%s\n' "$C_ERR" "$C_RESET" ;;
+                       *)       printf '%sfailed%s\n' "$C_ERR" "$C_RESET" ;;
+                   esac
+               done ;;
+            c|C|'') return 0 ;;
+            *) pki_err "no such option: $choice" ;;
+        esac
+    done
 }
