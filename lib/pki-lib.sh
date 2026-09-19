@@ -85,6 +85,9 @@ pki_apply_defaults() {
     KEY_ALGO="${KEY_ALGO:-rsa2048}"          # rsa2048 | rsa4096 | ecp256 | ecp384
     YK_KEY_ALGO="${YK_KEY_ALGO:-RSA2048}"    # what the YubiKey generates in slot 9c
     YK_PIN_POLICY="${YK_PIN_POLICY:-ONCE}"
+    YK_MGMT_KEY="${YK_MGMT_KEY:-}"
+    YK_MGMT_KEY_FILE="${YK_MGMT_KEY_FILE:-}"
+    PIV_TIMEOUT="${PIV_TIMEOUT:-300}"
     YK_TOUCH_POLICY="${YK_TOUCH_POLICY:-ALWAYS}"
     INT_CA_CSR="${INT_CA_CSR:-$INT_CA_DIR/$INT_CA_NAME.csr}"
     INT_CA_KEY_PASS="${INT_CA_KEY_PASS:-}"   # empty = unencrypted (needed for unattended renewal)
@@ -961,11 +964,11 @@ PKI_ACTIONS="status preflight renew deploy deploy-all trust-push trust-push-all 
 webmin-push-all webmin-fix webmin-fix-all ldap-fix ldap-fix-all samba-fix
 nextcloud-certcheck verify-tls logs issue issue-all trust-cleanup
 trust-cleanup-all yk-info yk-slot yk-export-cert yk-retries
-yk-pkcs11 yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin
+yk-pkcs11 yk-protect-mgmt yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin
 yk-change-mgmt"
 
 # Refused in the web UI: these prompt for a PIN or need a physical touch.
-PKI_TTY_ACTIONS="yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin yk-change-mgmt"
+PKI_TTY_ACTIONS="yk-protect-mgmt yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin yk-change-mgmt"
 pki_action_is_tty() { case " $PKI_TTY_ACTIONS " in *" $1 "*) return 0 ;; esac; return 1; }
 
 pki_action_valid() { case " $(printf '%s' "$PKI_ACTIONS" | tr '\n' ' ') " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -1028,6 +1031,7 @@ pki_run_action() {
         yk-export-cert)      act_yk_export_cert "${arg:-$YUBIKEY_SLOT}" ;;
         yk-retries)          act_yk_retries ;;
         yk-pkcs11)           act_yk_pkcs11 ;;
+        yk-protect-mgmt)     act_yk_protect_mgmt ;;
         yk-test)             act_yk_test "${arg:-$YUBIKEY_SLOT}" ;;
         yk-sign-intermediate) act_yk_sign_intermediate "$arg" ;;
         yk-change-pin)       act_yk_change_pin ;;
@@ -1528,9 +1532,86 @@ pki_yk_cert_api() {
     printf '%s' "$PKI_YK_CERT_API"
 }
 
+# ykman stores the management key on the card protected by the PIN when
+# change-management-key --protect was used. It then asks for the PIN instead
+# of the management key, so telling the user to press enter is wrong.
+pki_yk_mgmt_protected() {
+    timeout 20 ykman piv info 2>/dev/null \
+        | grep -qiE 'protected by pin|stored on the yubikey'
+}
+
+# What ykman will ask for when writing to a slot.
+pki_yk_mgmt_prompt_hint() {
+    if [ -n "${YK_MGMT_KEY:-}${YK_MGMT_KEY_FILE:-}" ]; then
+        printf 'supplied from pki.conf - no prompt expected'
+    elif pki_yk_mgmt_protected; then
+        printf 'it will ask for your PIV PIN (the management key is stored on the key)'
+    else
+        printf 'it will ask for the PIV MANAGEMENT KEY - press enter for the factory default'
+    fi
+}
+
+YK_DEFAULT_MGMT_KEY=010203040506070801020304050607080102030405060708
+
+# A PIV management key is hex: 48 chars for TDES/AES192, 64 for AES256.
+pki_yk_mgmt_valid() {
+    case "$1" in
+        *[!0-9A-Fa-f]*) return 1 ;;
+    esac
+    case ${#1} in 48|64) return 0 ;; *) return 1 ;; esac
+}
+
+# Resolve the management key from pki.conf, or from its own file. Sets
+# YK_MGMT for ykman. Empty means "let ykman handle it" - which is what you
+# want when the key is stored on the card protected by the PIN.
 pki_yk_mgmt_args() {
     YK_MGMT=()
-    [ -n "${YK_MGMT_KEY:-}" ] && YK_MGMT=(--management-key "$YK_MGMT_KEY")
+    local key="" src=""
+    if [ -n "${YK_MGMT_KEY:-}" ]; then
+        key="$YK_MGMT_KEY"; src="pki.conf"
+    elif [ -n "${YK_MGMT_KEY_FILE:-}" ]; then
+        if [ ! -r "$YK_MGMT_KEY_FILE" ]; then
+            pki_err "YK_MGMT_KEY_FILE not readable: $YK_MGMT_KEY_FILE"
+            return 1
+        fi
+        local mode; mode=$(stat -c '%a' "$YK_MGMT_KEY_FILE" 2>/dev/null)
+        case "$mode" in
+            600|400) ;;
+            *) pki_warn "$YK_MGMT_KEY_FILE is mode $mode - should be 600" ;;
+        esac
+        key=$(tr -d '[:space:]' < "$YK_MGMT_KEY_FILE")
+        src="$YK_MGMT_KEY_FILE"
+    else
+        return 0
+    fi
+
+    if ! pki_yk_mgmt_valid "$key"; then
+        pki_err "management key from $src is not valid hex of 48 or 64 characters"
+        return 1
+    fi
+    [ "$key" = "$YK_DEFAULT_MGMT_KEY" ] \
+        && pki_warn "the management key is the factory default - anyone with the key can rewrite its slots"
+    YK_MGMT=(--management-key "$key")
+}
+
+# Move the management key onto the card, protected by the PIN. Nothing is
+# then stored on disk and ykman stops asking for it.
+act_yk_protect_mgmt() {
+    pki_yk_ready || return 1
+    pki_tty_required yk-protect-mgmt || return 2
+    pki_info "== store a new random management key on the key, protected by the PIN"
+    pki_info "   after this nothing needs YK_MGMT_KEY or YK_MGMT_KEY_FILE"
+    pki_warn "   you will be asked for the CURRENT management key (enter = factory default)"
+    pki_yk_mgmt_args || return 1
+    if pki_run_tty "protect management key" timeout "$PIV_TIMEOUT" \
+         ykman piv access change-management-key "${YK_MGMT[@]}" --protect --generate; then
+        pki_ok "management key is now stored on the key and unlocked by the PIN"
+        [ -n "${YK_MGMT_KEY:-}${YK_MGMT_KEY_FILE:-}" ] \
+            && pki_warn "remove YK_MGMT_KEY / YK_MGMT_KEY_FILE from pki.conf - they are now stale"
+    else
+        pki_err "could not change the management key"
+        return 1
+    fi
 }
 
 # 0 if the slot holds a readable certificate (which is what makes a PKCS#11

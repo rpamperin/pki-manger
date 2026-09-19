@@ -80,6 +80,25 @@ If anything fails after the key is generated, retry without regenerating it:
 time. Init resolves the URI itself as soon as the slot has a certificate and
 tells you what to put in `pki.conf` if the default was wrong.
 
+### The management key
+
+Writing to a PIV slot needs the management key, separate from the PIN. The
+tidiest answer is to keep it on the key itself:
+
+```bash
+./pki-manager.sh --run yk-protect-mgmt
+```
+
+That generates a random management key, stores it on the YubiKey protected by
+your PIN, and retires the factory default — which is published, and lets
+anyone holding the key rewrite its slots. Afterwards ykman asks for the PIN
+instead, and there is nothing on disk to protect or back up.
+
+If you would rather hold it yourself, set `YK_MGMT_KEY` in `pki.conf` or point
+`YK_MGMT_KEY_FILE` at a mode-600 file. Both work, but ykman only accepts the
+management key as a command-line argument, so it is briefly visible in `ps`
+to local users while a slot write runs. `yk-protect-mgmt` has no such window.
+
 ### The PIN, and why slot 9C asks twice
 
 PIV defines slot 9C as the Digital Signature key and requires a PIN check
@@ -226,6 +245,7 @@ The root CA private key is in PIV slot 9c and never leaves the key.
 | Action | Needs |
 |---|---|
 | `yk-info`, `yk-slot`, `yk-retries`, `yk-export-cert`, `yk-pkcs11` | nothing — safe to run anywhere |
+| `yk-protect-mgmt` | current management key (enter = factory default) |
 | `yk-test` | PIN + touch |
 | `yk-sign-intermediate [csr]` | PIN + touch — signs via the PKCS#11 engine |
 | `yk-change-pin`, `yk-change-puk`, `yk-unblock-pin`, `yk-change-mgmt` | PIN / PUK / mgmt key |

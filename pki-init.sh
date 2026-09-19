@@ -217,8 +217,7 @@ else
             exit 1
         fi
     fi
-    [ -n "${YK_MGMT_KEY:-}" ] \
-        || pki_warn "   ykman will ask for the PIV MANAGEMENT KEY - press enter for the default"
+    pki_warn "   $(pki_yk_mgmt_prompt_hint)"
     pki_yk_mgmt_args
     if [ "$(pki_yk_cert_api)" = new ]; then
         pki_run_tty "bootstrap certificate" timeout "${PIV_TIMEOUT:-300}" \
@@ -303,8 +302,7 @@ else
     # there. Without this a failed import leaves the throwaway cert in place
     # and everything downstream fails much later with a confusing error.
     pki_info "   writing the root certificate to slot $YUBIKEY_SLOT"
-    [ -n "${YK_MGMT_KEY:-}" ] \
-        || pki_warn "   ykman will ask for the PIV MANAGEMENT KEY - press enter for the default"
+    pki_warn "   $(pki_yk_mgmt_prompt_hint)"
     if ! pki_run_tty "import root certificate into slot $YUBIKEY_SLOT" \
             pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT"; then
         pki_err "the slot still holds the previous certificate"
