@@ -88,6 +88,9 @@ pki_apply_defaults() {
     YK_MGMT_KEY="${YK_MGMT_KEY:-}"
     YK_MGMT_KEY_FILE="${YK_MGMT_KEY_FILE:-}"
     PIV_TIMEOUT="${PIV_TIMEOUT:-300}"
+    # The slot write is optional, so it waits a fraction of the time the
+    # steps that actually build the CA are given.
+    PIV_IMPORT_TIMEOUT="${PIV_IMPORT_TIMEOUT:-120}"
     YK_TOUCH_POLICY="${YK_TOUCH_POLICY:-ALWAYS}"
     INT_CA_CSR="${INT_CA_CSR:-$INT_CA_DIR/$INT_CA_NAME.csr}"
     INT_CA_KEY_PASS="${INT_CA_KEY_PASS:-}"   # empty = unencrypted (needed for unattended renewal)
@@ -1067,10 +1070,11 @@ pki_yk_import_cert() {  # slot infile
     pki_yk_mgmt_args
     # PIV_TIMEOUT is generous: this prompts for the management key unless
     # YK_MGMT_KEY is set, and a person has to type it.
+    local t="${PIV_IMPORT_TIMEOUT:-120}"
     if [ "$(pki_yk_cert_api)" = new ]; then
-        timeout "${PIV_TIMEOUT:-300}" ykman piv certificates import "${YK_MGMT[@]}" "$slot" "$in"
+        timeout "$t" ykman piv certificates import "${YK_MGMT[@]}" "$slot" "$in"
     else
-        timeout "${PIV_TIMEOUT:-300}" ykman piv import-certificate "${YK_MGMT[@]}" "$slot" "$in"
+        timeout "$t" ykman piv import-certificate "${YK_MGMT[@]}" "$slot" "$in"
     fi
 }
 

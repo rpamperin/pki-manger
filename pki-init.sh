@@ -11,7 +11,7 @@ set -uo pipefail
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF_DIR/lib/pki-lib.sh"
 
-DRY=0 FORCE_SLOT=0 FORCE_CA=0 REUSE_SLOT=0 INT_ONLY=0
+DRY=0 FORCE_SLOT=0 FORCE_CA=0 REUSE_SLOT=0 INT_ONLY=0 SKIP_SLOT_IMPORT=0
 usage() {
     cat <<EOF
 usage: pki-init.sh [options]
@@ -21,6 +21,9 @@ usage: pki-init.sh [options]
       --intermediate-only
                        root CA already exists: create only the intermediate
                        (use this to resume after step 4 failed)
+      --skip-slot-import
+                       do not store the root cert on the key (it is optional;
+                       do it later with: pki-manager.sh --run yk-import-root)
       --reuse-slot     keep the key already in slot $YUBIKEY_SLOT and carry on
                        (use this to retry after a failure past key generation)
       --replace-slot   overwrite a key already in YubiKey slot $YUBIKEY_SLOT (DESTRUCTIVE)
@@ -36,6 +39,7 @@ while [ $# -gt 0 ]; do
         -n|--dry-run)   DRY=1; shift ;;
         --replace-ca)   FORCE_CA=1; shift ;;
         --intermediate-only) INT_ONLY=1; FORCE_CA=1; shift ;;
+        --skip-slot-import) SKIP_SLOT_IMPORT=1; shift ;;
         --reuse-slot)   REUSE_SLOT=1; shift ;;
         --replace-slot) FORCE_SLOT=1; shift ;;
         -h|--help)      pki_load_conf; usage; exit 0 ;;
@@ -308,12 +312,15 @@ else
     pki_info "   writing the root certificate to slot $YUBIKEY_SLOT"
     pki_warn "   $(pki_yk_mgmt_prompt_hint)"
     pki_warn "   then TOUCH THE KEY - it blinks without printing anything"
+    pki_info "   if nothing happens, wait: this gives up after ${PIV_IMPORT_TIMEOUT}s and carries on"
     # Storing the certificate on the key is a convenience: the copy on disk is
     # what signs and what gets distributed, and the slot only needs *some*
     # certificate for PKCS#11 to expose the private key. So a failure here is
     # reported and stepped over rather than stopping the whole build.
     SLOT_OK=0
-    if pki_run_tty "import root certificate into slot $YUBIKEY_SLOT" \
+    if [ "$SKIP_SLOT_IMPORT" = 1 ]; then
+        pki_info "   skipped (--skip-slot-import)"
+    elif pki_run_tty "import root certificate into slot $YUBIKEY_SLOT" \
             pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT"; then
         VERIFY=$(mktemp)
         if pki_yk_export_cert "$YUBIKEY_SLOT" "$VERIFY" && pki_cert_is_ca "$VERIFY"; then
@@ -322,7 +329,7 @@ else
         fi
         rm -f "$VERIFY"
     fi
-    if [ "$SLOT_OK" = 0 ]; then
+    if [ "$SLOT_OK" = 0 ] && [ "$SKIP_SLOT_IMPORT" = 0 ]; then
         pki_warn "could not store the root certificate on the key - CONTINUING"
         pki_warn "  $ROOT_CA_CRT is authoritative and unaffected"
         pki_warn "  the slot keeps its old certificate, which still lets PKCS#11 sign"
