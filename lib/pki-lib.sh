@@ -326,7 +326,13 @@ pki_probe_yubikey() {
     if pki_yk_slot_occupied "$YUBIKEY_SLOT"; then
         algo=$(printf '%s' "$out" | sed -n "/^[Ss]lot ${YUBIKEY_SLOT}/I,/^[Ss]lot /Ip" \
                | sed -n 's/.*[Pp]rivate key type: *//p' | head -1)
-        pki_rec yubikey slot-$YUBIKEY_SLOT ok "key present" "serial ${serial:-?}, ${algo:-key}, PIN tries ${tries:-?}"
+        # Firmware below 5.3 has no PIV key metadata, so ykman prints EMPTY
+        # when it cannot read the algorithm. That means "unknown", not "no
+        # key" - reporting it verbatim looks like the slot was wiped.
+        case "$algo" in
+            EMPTY|empty|''|*[Uu]nknown*) algo="algorithm not reported by this firmware" ;;
+        esac
+        pki_rec yubikey slot-$YUBIKEY_SLOT ok "key present" "serial ${serial:-?}, $algo, PIN tries ${tries:-?}"
     else
         pki_rec yubikey slot-$YUBIKEY_SLOT err "slot empty" "no root CA key on serial ${serial:-?}"
     fi
@@ -340,11 +346,25 @@ pki_probe_yubikey() {
     esac
 
     # expiry of the CA cert actually stored on the key
-    local tmp; tmp=$(mktemp)
+    local tmp fp_slot fp_disk; tmp=$(mktemp)
     if pki_yk_export_cert "$YUBIKEY_SLOT" "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
         days=$(pki_cert_days "$tmp")
         st=$(pki_days_state "$days")
-        pki_rec yubikey slot-cert "$st" "${days:-?}d" "$(pki_cert_subject "$tmp")"
+        if ! pki_cert_is_ca "$tmp"; then
+            pki_rec yubikey slot-cert err "not a CA" \
+                "slot holds a non-CA cert - finish: ./pki-init.sh --reuse-slot"
+        elif [ -r "$ROOT_CA_CRT" ]; then
+            fp_slot=$(openssl x509 -in "$tmp" -noout -fingerprint -sha256 2>/dev/null)
+            fp_disk=$(openssl x509 -in "$ROOT_CA_CRT" -noout -fingerprint -sha256 2>/dev/null)
+            if [ "$fp_slot" = "$fp_disk" ]; then
+                pki_rec yubikey slot-cert "$st" "${days:-?}d" "$(pki_cert_subject "$tmp")"
+            else
+                pki_rec yubikey slot-cert warn "stale (${days:-?}d)" \
+                    "differs from $ROOT_CA_CRT - the import never finished"
+            fi
+        else
+            pki_rec yubikey slot-cert "$st" "${days:-?}d" "$(pki_cert_subject "$tmp")"
+        fi
     fi
     rm -f "$tmp"
 }
