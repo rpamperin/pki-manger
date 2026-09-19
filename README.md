@@ -103,6 +103,29 @@ only needs *some* certificate for PKCS#11 to expose the private key. So
 ./pki-manager.sh --run yk-import-root
 ```
 
+### Touch-only signing (no PIN)
+
+Signing can require just a touch, with no PIN at all:
+
+```bash
+./pki-init.sh --touch-only --replace-slot
+```
+
+The catch is that a key's PIN policy is burned in when the key is generated
+and cannot be altered later, so this needs a **new** root keypair — which
+orphans everything the old root signed. It is cheap before you have issued or
+distributed anything, and expensive afterwards. `pki-init.sh` refuses to
+combine `--touch-only` with `--reuse-slot` or `--intermediate-only` for that
+reason, and will not silently replace an occupied slot.
+
+Understand the trade: a touch proves someone is physically present, not who
+they are. With no PIN, anyone who picks up the key can sign with your root CA.
+The PIN is what makes a stolen key useless. Reasonable for a home lab where
+the key lives on your keyring; not for a root CA that matters to anyone else.
+
+If the key is already generated that way, set `YK_NO_PIN=1` in `pki.conf` so
+the tooling stops asking.
+
 ### The management key
 
 Writing to a PIV slot needs the management key, separate from the PIN. The

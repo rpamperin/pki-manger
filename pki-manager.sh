@@ -64,9 +64,9 @@ esac
 STATUS_CACHE=""
 
 refresh_status() {
-    printf '%sscanning...%s\r' "$C_DIM" "$C_RESET"
+    # pki_collect_status draws its own progress on stderr; stdout is the
+    # records, so capturing them here does not swallow the bar.
     STATUS_CACHE="$(pki_collect_status)"
-    printf '            \r'
 }
 
 banner() {

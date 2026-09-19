@@ -118,6 +118,7 @@ for h in "${TARGETS[@]}"; do
     fi
 
     printf '\n-- %s (%s)\n' "$fqdn" "$reason"
+    pki_progress "$done_ok" "$due" "issuing $fqdn"; pki_prog_clear
     if pki_issue_cert "$h" "$DAYS" "$ROTATE"; then
         done_ok=$((done_ok+1))
     else

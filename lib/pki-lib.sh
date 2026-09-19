@@ -85,6 +85,9 @@ pki_apply_defaults() {
     KEY_ALGO="${KEY_ALGO:-rsa2048}"          # rsa2048 | rsa4096 | ecp256 | ecp384
     YK_KEY_ALGO="${YK_KEY_ALGO:-RSA2048}"    # what the YubiKey generates in slot 9c
     YK_PIN_POLICY="${YK_PIN_POLICY:-ONCE}"
+    # Touch-only signing: no PIN is asked for or sent. Only works when the
+    # key was generated with YK_PIN_POLICY=NEVER, which is fixed at generation.
+    YK_NO_PIN="${YK_NO_PIN:-0}"
     YK_MGMT_KEY="${YK_MGMT_KEY:-}"
     YK_MGMT_KEY_FILE="${YK_MGMT_KEY_FILE:-}"
     PIV_TIMEOUT="${PIV_TIMEOUT:-300}"
@@ -414,6 +417,7 @@ pki_role_ports() {
 pki_probe_servers() {
     local h addr up=0 down=0 detail="" p
     for h in $HOSTS; do
+        pki_progress_label "servers: $h"
         addr=$(pki_host_addr "$h"); up=0; down=0; detail=""
         for p in $SSH_PORT $(pki_role_ports "$h"); do
             if pki_tcp "$addr" "$p" 3; then
@@ -433,6 +437,7 @@ pki_probe_ldaps() {
     local h addr fqdn tmp len days
     for h in $HOSTS; do
         pki_host_has_role "$h" ldaps || continue
+        pki_progress_label "ldaps: $h"
         addr=$(pki_host_addr "$h"); fqdn=$(pki_host_fqdn "$h")
         tmp=$(mktemp)
         if ! pki_tls_fetch "$addr" 636 "$fqdn" "$tmp"; then
@@ -454,6 +459,7 @@ pki_probe_webmin() {
     local h addr fqdn tmp len days
     for h in $HOSTS; do
         pki_host_has_role "$h" webmin || continue
+        pki_progress_label "webmin: $h"
         addr=$(pki_host_addr "$h"); fqdn=$(pki_host_fqdn "$h")
         tmp=$(mktemp)
         if ! pki_tls_fetch "$addr" "$WEBMIN_PORT" "$fqdn" "$tmp"; then
@@ -545,13 +551,16 @@ pki_probe_nextcloud() {
 PKI_SECTIONS="conf yubikey cert server ldaps webmin nextcloud"
 
 pki_collect_status() {
-    pki_probe_conf
-    pki_probe_yubikey
-    pki_probe_certs
-    pki_probe_servers
-    pki_probe_ldaps
-    pki_probe_webmin
-    pki_probe_nextcloud
+    local n=0 tot=7
+    pki_progress $n $tot "config";     pki_probe_conf;      n=$((n+1))
+    pki_progress $n $tot "yubikey";    pki_probe_yubikey;   n=$((n+1))
+    pki_progress $n $tot "certs";      pki_probe_certs;     n=$((n+1))
+    pki_progress $n $tot "servers";    pki_probe_servers;   n=$((n+1))
+    pki_progress $n $tot "ldaps";      pki_probe_ldaps;     n=$((n+1))
+    pki_progress $n $tot "webmin";     pki_probe_webmin;    n=$((n+1))
+    pki_progress $n $tot "nextcloud";  pki_probe_nextcloud; n=$((n+1))
+    pki_progress $n $tot "done"
+    pki_prog_clear
 }
 
 pki_state_color() {
@@ -976,6 +985,26 @@ pki_action_is_tty() { case " $PKI_TTY_ACTIONS " in *" $1 "*) return 0 ;; esac; r
 
 pki_action_valid() { case " $(printf '%s' "$PKI_ACTIONS" | tr '\n' ' ') " in *" $1 "*) return 0 ;; esac; return 1; }
 
+# Run an action over every host, announcing which one, so a long bulk run
+# never looks stalled. An optional role filter skips hosts that lack it.
+pki_each_host() {  # action-fn [required-role]
+    local fn="$1" role="${2:-}" h n=0 tot=0 rc=0
+    for h in $HOSTS; do
+        [ -n "$role" ] && { pki_host_has_role "$h" "$role" || continue; }
+        tot=$((tot+1))
+    done
+    for h in $HOSTS; do
+        [ -n "$role" ] && { pki_host_has_role "$h" "$role" || continue; }
+        pki_progress "$n" "$tot" "$fn: $h"
+        pki_prog_clear
+        "$fn" "$h" || rc=1
+        n=$((n+1))
+        pki_progress "$n" "$tot" "$fn: $h done"
+        pki_prog_clear
+    done
+    return $rc
+}
+
 pki_run_action() {
     local action="$1" arg="${2:-}" h rc=0
     pki_action_valid "$action" || { pki_err "unknown action: $action"; return 2; }
@@ -1012,23 +1041,23 @@ pki_run_action() {
         preflight)           act_preflight ;;
         renew)               act_renew ;;
         deploy)              act_deploy "$arg" ;;
-        deploy-all)          for h in $HOSTS; do act_deploy "$h" || rc=1; done ;;
+        deploy-all)          pki_each_host act_deploy || rc=1 ;;
         trust-push)          act_trust_push "$arg" ;;
-        trust-push-all)      for h in $HOSTS; do act_trust_push "$h" || rc=1; done ;;
+        trust-push-all)      pki_each_host act_trust_push || rc=1 ;;
         webmin-push)         act_webmin_push "$arg" ;;
-        webmin-push-all)     for h in $HOSTS; do pki_host_has_role "$h" webmin && { act_webmin_push "$h" || rc=1; }; done ;;
+        webmin-push-all)     pki_each_host act_webmin_push webmin || rc=1 ;;
         webmin-fix)          act_webmin_fix "$arg" ;;
-        webmin-fix-all)      for h in $HOSTS; do pki_host_has_role "$h" webmin && { act_webmin_fix "$h" || rc=1; }; done ;;
+        webmin-fix-all)      pki_each_host act_webmin_fix webmin || rc=1 ;;
         ldap-fix)            act_ldap_fix "$arg" ;;
-        ldap-fix-all)        for h in $HOSTS; do act_ldap_fix "$h" || rc=1; done ;;
+        ldap-fix-all)        pki_each_host act_ldap_fix || rc=1 ;;
         samba-fix)           act_samba_fix "$arg" ;;
         nextcloud-certcheck) act_nextcloud_certcheck "${arg:-auto}" ;;
         verify-tls)          act_verify_tls "$arg" ;;
         logs)                act_logs "$arg" ;;
         issue)               pki_issue_cert "$arg" "$LEAF_DAYS" ;;
-        issue-all)           for h in $HOSTS; do pki_issue_cert "$h" "$LEAF_DAYS" || rc=1; done ;;
+        issue-all)           pki_each_host pki_issue_cert || rc=1 ;;
         trust-cleanup)       act_trust_cleanup "$arg" ;;
-        trust-cleanup-all)   for h in $HOSTS; do act_trust_cleanup "$h" || rc=1; done ;;
+        trust-cleanup-all)   pki_each_host act_trust_cleanup || rc=1 ;;
         yk-info)             act_yk_info ;;
         yk-slot)             act_yk_slot "${arg:-$YUBIKEY_SLOT}" ;;
         yk-export-cert)      act_yk_export_cert "${arg:-$YUBIKEY_SLOT}" ;;
@@ -1494,8 +1523,14 @@ act_preflight() {
     done
 
     printf '\n%sHOSTS%s\n' "$C_HEAD" "$C_RESET"
+    local hn=0 htot=0 probe
+    for h in $HOSTS; do htot=$((htot+1)); done
     for h in $HOSTS; do
-        case "$(pki_ssh_probe "$h")" in
+        pki_progress "$hn" "$htot" "ssh: $h"
+        probe=$(pki_ssh_probe "$h")
+        hn=$((hn+1))
+        pki_prog_clear
+        case "$probe" in
             ok)
                 if pki_ssh_sudo "$h" true >/dev/null 2>&1; then
                     mark ok "$h ($(pki_host_addr "$h")) ssh + root"
@@ -1548,6 +1583,68 @@ pki_run_tty() {
     "$@" && return 0
     local rc=$?
     pki_err "$desc failed (exit $rc) - see the output above"
+    return $rc
+}
+
+# ------------------------------------------------------------- progress ----
+# All progress output goes to stderr and only when stderr is a terminal, so it
+# never mixes into the TSV records probes write on stdout, and never reaches
+# the web UI, which captures both streams.
+
+PKI_BAR='########################'
+PKI_DOTS='........................'
+PKI_PROG_CUR=0
+PKI_PROG_TOT=0
+
+pki_prog_clear() { [ -t 2 ] && printf '\r%*s\r' 78 '' >&2; return 0; }
+
+# pki_progress <current> <total> <label>
+pki_progress() {
+    PKI_PROG_CUR="$1"; PKI_PROG_TOT="$2"
+    [ -t 2 ] || return 0
+    local w=24 filled
+    [ "$2" -gt 0 ] 2>/dev/null || return 0
+    filled=$(( $1 * w / $2 ))
+    [ "$filled" -gt "$w" ] && filled=$w
+    printf '\r   [%s%s] %d/%d  %-28s' \
+        "${PKI_BAR:0:$filled}" "${PKI_DOTS:0:$((w-filled))}" "$1" "$2" "$3" >&2
+}
+
+# Redraw the current bar with a new label, for slow steps that work through
+# several hosts under one heading.
+pki_progress_label() { pki_progress "$PKI_PROG_CUR" "$PKI_PROG_TOT" "$1"; }
+
+# Spinner with elapsed seconds, for work with no predictable duration. The
+# grace period keeps it clear of any prompt the command shows first.
+pki_spin_start() {  # label [grace-seconds]
+    PKI_SPIN_LABEL="$1"; PKI_SPIN_PID=""
+    [ -t 2 ] || return 0
+    local grace="${2:-4}"
+    (
+        local t=0 n=0 frames='|/-\\'
+        while :; do
+            sleep 0.25; t=$((t+1))
+            [ $((t/4)) -lt "$grace" ] && continue
+            n=$(( (n+1) % 4 ))
+            printf '\r   %s %s  %ds ' "${frames:$n:1}" "$PKI_SPIN_LABEL" "$((t/4))" >&2
+        done
+    ) &
+    PKI_SPIN_PID=$!
+}
+
+pki_spin_stop() {
+    [ -n "${PKI_SPIN_PID:-}" ] || return 0
+    kill "$PKI_SPIN_PID" 2>/dev/null; wait "$PKI_SPIN_PID" 2>/dev/null
+    PKI_SPIN_PID=""
+    pki_prog_clear
+}
+
+# Run a command under a spinner. Keeps the terminal, so prompts still work.
+pki_run_spin() {  # label command...
+    local label="$1"; shift
+    pki_spin_start "$label" 4
+    "$@"; local rc=$?
+    pki_spin_stop
     return $rc
 }
 
@@ -1740,6 +1837,10 @@ pki_pkcs11_slot_id() {  # PIV slot -> PKCS#11 id
 # "Invalid PIN length" after the prompt, and because every attempt that
 # reaches the card costs one of three tries before the key is blocked.
 pki_piv_pin_prompt() {
+    if [ "${YK_NO_PIN:-0}" = 1 ]; then
+        pki_info "YK_NO_PIN=1 - touch only, no PIN will be asked for or sent"
+        return 0
+    fi
     [ -n "${PKI_PIV_PIN:-}" ] && return 0
     pki_tty_required "PIN entry" || return 1
     local pin tries

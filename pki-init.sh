@@ -11,7 +11,7 @@ set -uo pipefail
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF_DIR/lib/pki-lib.sh"
 
-DRY=0 FORCE_SLOT=0 FORCE_CA=0 REUSE_SLOT=0 INT_ONLY=0 SKIP_SLOT_IMPORT=0
+DRY=0 FORCE_SLOT=0 FORCE_CA=0 REUSE_SLOT=0 INT_ONLY=0 SKIP_SLOT_IMPORT=0 TOUCH_ONLY=0
 usage() {
     cat <<EOF
 usage: pki-init.sh [options]
@@ -21,6 +21,8 @@ usage: pki-init.sh [options]
       --intermediate-only
                        root CA already exists: create only the intermediate
                        (use this to resume after step 4 failed)
+      --touch-only     generate the key so signing needs only a touch, never a
+                       PIN. Requires a NEW keypair, so only with --replace-slot
       --skip-slot-import
                        do not store the root cert on the key (it is optional;
                        do it later with: pki-manager.sh --run yk-import-root)
@@ -39,6 +41,7 @@ while [ $# -gt 0 ]; do
         -n|--dry-run)   DRY=1; shift ;;
         --replace-ca)   FORCE_CA=1; shift ;;
         --intermediate-only) INT_ONLY=1; FORCE_CA=1; shift ;;
+        --touch-only)   TOUCH_ONLY=1; YK_PIN_POLICY=NEVER; YK_NO_PIN=1; shift ;;
         --skip-slot-import) SKIP_SLOT_IMPORT=1; shift ;;
         --reuse-slot)   REUSE_SLOT=1; shift ;;
         --replace-slot) FORCE_SLOT=1; shift ;;
@@ -49,6 +52,26 @@ done
 
 pki_load_conf
 trap 'pki_pin_file_cleanup' EXIT INT TERM
+
+# The PIN policy is burned in when the key is generated and cannot be altered
+# afterwards, so touch-only is only reachable on a fresh keypair.
+if [ "$TOUCH_ONLY" = 1 ]; then
+    YK_PIN_POLICY=NEVER; YK_NO_PIN=1
+    if [ "$REUSE_SLOT" = 1 ] || [ "$INT_ONLY" = 1 ]; then
+        pki_err "--touch-only needs a new keypair, so it cannot be combined with"
+        pki_err "--reuse-slot or --intermediate-only, which keep the existing key."
+        pki_err "the PIN policy is fixed when a key is generated and cannot be changed."
+        exit 2
+    fi
+    if [ "$FORCE_SLOT" = 0 ] && [ "$DRY" = 0 ] && pki_yk_slot_occupied "$YUBIKEY_SLOT"; then
+        pki_err "--touch-only replaces the key in slot $YUBIKEY_SLOT with a new one."
+        pki_err "everything signed by the current root would be orphaned."
+        pki_err "if that is what you want: ./pki-init.sh --touch-only --replace-slot"
+        exit 2
+    fi
+    pki_warn "touch-only: anyone holding this key can sign with it - a touch proves"
+    pki_warn "presence, not identity. The PIN is what stops a stolen key being used."
+fi
 
 run() {  # echo in dry-run, execute otherwise
     if [ "$DRY" = 1 ]; then
@@ -277,6 +300,9 @@ else
             -days "$ROOT_CA_DAYS" -out "$ROOT_CA_CRT" 2>&1
     }
     SIGNED=0
+    # The spinner keeps clear of any PIN prompt openssl shows first, and only
+    # appears if the signature is actually waiting on a touch.
+    pki_spin_start "signing root CA - touch the key if it blinks" 6
     # Both pin-source spellings keep the PIN out of ps; pin-value does not,
     # so it is only reached when this libp11 build honours neither.
     if sign_root "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" file)"; then
@@ -289,6 +315,7 @@ else
         pki_warn "the PIN is briefly visible in ps while this signs"
         sign_root "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && SIGNED=1
     fi
+    pki_spin_stop
     if [ "$SIGNED" = 0 ]; then
         pki_err "self-signing failed - check YK_ROOT_KEY_URI ($YK_ROOT_KEY_URI) and PKCS11_MODULE"
         pki_err "PIN tries remaining: $(timeout 15 ykman piv info 2>/dev/null | sed -n 's/.*PIN tries remaining: *//p' | head -1)"
@@ -364,6 +391,7 @@ else
             -out "$INT_CA_CRT" 2>&1
     }
     INTSIGNED=0
+    pki_spin_start "signing intermediate - touch the key if it blinks" 6
     # Both pin-source spellings keep the PIN out of ps; pin-value does not,
     # so it is only reached when this libp11 build honours neither.
     if sign_int "$(pki_pkcs11_pin_uri "$YK_ROOT_KEY_URI" file)"; then
@@ -376,6 +404,7 @@ else
         pki_warn "the PIN is briefly visible in ps while this signs"
         sign_int "$(pki_pkcs11_pinvalue_uri "$YK_ROOT_KEY_URI")" && INTSIGNED=1
     fi
+    pki_spin_stop
     if [ "$INTSIGNED" = 0 ]; then
         rm -f "$EXT"; pki_err "intermediate signing failed"
         pki_err "retry without regenerating the key: ./pki-init.sh --reuse-slot --replace-ca"
