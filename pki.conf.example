@@ -113,6 +113,12 @@ SSH_USER=root
 #YK_KEY_ALGO=RSA2048    # RSA2048 | RSA4096 | ECCP256 | ECCP384
 #YK_PIN_POLICY=ONCE
 #YK_TOUCH_POLICY=ALWAYS
+# Writing to a PIV slot needs the management key. Left unset, ykman prompts
+# for it (press enter for the factory default). Set it only if you changed it
+# AND want unattended slot writes - it is a credential, so this file stays 600.
+#YK_MGMT_KEY=
+# Seconds allowed for a ykman step that waits on a person typing or touching.
+#PIV_TIMEOUT=300
 #PKCS11_MODULE=/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so
 #YK_ROOT_KEY_URI="pkcs11:object=SIGN%20key;type=private"
 #INT_CA_DAYS=1825

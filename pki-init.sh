@@ -176,10 +176,10 @@ elif [ "$DRY" = 1 ]; then
         --pin-policy "${YK_PIN_POLICY:-ONCE}" --touch-policy "${YK_TOUCH_POLICY:-ALWAYS}" \
         "$YUBIKEY_SLOT" "$PUB"
 else
-    if ! timeout 180 ykman piv keys generate --algorithm "$YK_KEY_ALGO" \
+    if ! timeout "${PIV_TIMEOUT:-300}" ykman piv keys generate --algorithm "$YK_KEY_ALGO" \
             --pin-policy "${YK_PIN_POLICY:-ONCE}" --touch-policy "${YK_TOUCH_POLICY:-ALWAYS}" \
             "$YUBIKEY_SLOT" "$PUB" 2>&1 \
-       && ! timeout 180 ykman piv generate-key -a "$YK_KEY_ALGO" \
+       && ! timeout "${PIV_TIMEOUT:-300}" ykman piv generate-key -a "$YK_KEY_ALGO" \
             --pin-policy "${YK_PIN_POLICY:-ONCE}" --touch-policy "${YK_TOUCH_POLICY:-ALWAYS}" \
             "$YUBIKEY_SLOT" "$PUB" 2>&1; then
         pki_err "key generation failed on slot $YUBIKEY_SLOT"
@@ -217,11 +217,18 @@ else
             exit 1
         fi
     fi
-    pki_try "bootstrap certificate" timeout 180 ykman piv certificates generate \
-            --subject "$ROOT_CA_SUBJECT" --valid-days 1 "$YUBIKEY_SLOT" "$PUB" \
-    || pki_try "bootstrap certificate (ykman 4.x syntax)" timeout 180 ykman piv generate-certificate \
-            -s "$ROOT_CA_SUBJECT" -d 1 "$YUBIKEY_SLOT" "$PUB" \
-    || { pki_err "could not write the bootstrap certificate - see the output above"; exit 1; }
+    [ -n "${YK_MGMT_KEY:-}" ] \
+        || pki_warn "   ykman will ask for the PIV MANAGEMENT KEY - press enter for the default"
+    pki_yk_mgmt_args
+    if [ "$(pki_yk_cert_api)" = new ]; then
+        pki_run_tty "bootstrap certificate" timeout "${PIV_TIMEOUT:-300}" \
+            ykman piv certificates generate "${YK_MGMT[@]}" \
+            --subject "$ROOT_CA_SUBJECT" --valid-days 1 "$YUBIKEY_SLOT" "$PUB"
+    else
+        pki_run_tty "bootstrap certificate" timeout "${PIV_TIMEOUT:-300}" \
+            ykman piv generate-certificate "${YK_MGMT[@]}" \
+            -s "$ROOT_CA_SUBJECT" -d 1 "$YUBIKEY_SLOT" "$PUB"
+    fi || { pki_err "could not write the bootstrap certificate - see the output above"; exit 1; }
     pki_warn "slot now holds a THROWAWAY certificate - not a CA, replaced in the next step"
 fi
 
@@ -295,7 +302,10 @@ else
     # Replace the bootstrap cert on the key, then read back what is actually
     # there. Without this a failed import leaves the throwaway cert in place
     # and everything downstream fails much later with a confusing error.
-    if ! pki_try "import root certificate into slot $YUBIKEY_SLOT" \
+    pki_info "   writing the root certificate to slot $YUBIKEY_SLOT"
+    [ -n "${YK_MGMT_KEY:-}" ] \
+        || pki_warn "   ykman will ask for the PIV MANAGEMENT KEY - press enter for the default"
+    if ! pki_run_tty "import root certificate into slot $YUBIKEY_SLOT" \
             pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT"; then
         pki_err "the slot still holds the previous certificate"
         exit 1

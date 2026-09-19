@@ -1032,16 +1032,21 @@ pki_yk_ready() {
 # ykman renamed these subcommands between 4.x and 5.x - support both
 pki_yk_export_cert() {  # slot outfile
     local slot="$1" out="$2"
-    timeout 20 ykman piv certificates export "$slot" "$out" 2>/dev/null && return 0
-    timeout 20 ykman piv export-certificate "$slot" "$out" 2>/dev/null && return 0
+    timeout 60 ykman piv certificates export "$slot" "$out" 2>/dev/null && return 0
+    timeout 60 ykman piv export-certificate "$slot" "$out" 2>/dev/null && return 0
     return 1
 }
 
 pki_yk_import_cert() {  # slot infile
     local slot="$1" in="$2"
-    timeout 30 ykman piv certificates import "$slot" "$in" 2>&1 && return 0
-    timeout 30 ykman piv import-certificate "$slot" "$in" 2>&1 && return 0
-    return 1
+    pki_yk_mgmt_args
+    # PIV_TIMEOUT is generous: this prompts for the management key unless
+    # YK_MGMT_KEY is set, and a person has to type it.
+    if [ "$(pki_yk_cert_api)" = new ]; then
+        timeout "${PIV_TIMEOUT:-300}" ykman piv certificates import "${YK_MGMT[@]}" "$slot" "$in"
+    else
+        timeout "${PIV_TIMEOUT:-300}" ykman piv import-certificate "${YK_MGMT[@]}" "$slot" "$in"
+    fi
 }
 
 # ykman 4.x prints "Slot 9c", 5.x prints "Slot 9C". A guard that protects a
@@ -1477,6 +1482,35 @@ pki_try() {  # description command...
     fi
     [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/       | /'
     return 0
+}
+
+# Run a command with its output going straight to the terminal, so prompts are
+# visible. pki_try captures output, which is right for silent commands and
+# wrong for anything interactive: a captured prompt looks like a hang.
+pki_run_tty() {
+    local desc="$1"; shift
+    "$@" && return 0
+    local rc=$?
+    pki_err "$desc failed (exit $rc) - see the output above"
+    return $rc
+}
+
+# ykman renamed the certificate subcommands between 4.x and 5.x. Detect once:
+# blind fallback would re-prompt for the management key on every attempt.
+pki_yk_cert_api() {
+    if [ -z "${PKI_YK_CERT_API:-}" ]; then
+        if timeout 20 ykman piv certificates --help >/dev/null 2>&1; then
+            PKI_YK_CERT_API=new
+        else
+            PKI_YK_CERT_API=old
+        fi
+    fi
+    printf '%s' "$PKI_YK_CERT_API"
+}
+
+pki_yk_mgmt_args() {
+    YK_MGMT=()
+    [ -n "${YK_MGMT_KEY:-}" ] && YK_MGMT=(--management-key "$YK_MGMT_KEY")
 }
 
 # 0 if the slot holds a readable certificate (which is what makes a PKCS#11
