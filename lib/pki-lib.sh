@@ -964,11 +964,11 @@ PKI_ACTIONS="status preflight renew deploy deploy-all trust-push trust-push-all 
 webmin-push-all webmin-fix webmin-fix-all ldap-fix ldap-fix-all samba-fix
 nextcloud-certcheck verify-tls logs issue issue-all trust-cleanup
 trust-cleanup-all yk-info yk-slot yk-export-cert yk-retries
-yk-pkcs11 yk-protect-mgmt yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin
+yk-pkcs11 yk-protect-mgmt yk-import-root yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin
 yk-change-mgmt"
 
 # Refused in the web UI: these prompt for a PIN or need a physical touch.
-PKI_TTY_ACTIONS="yk-protect-mgmt yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin yk-change-mgmt"
+PKI_TTY_ACTIONS="yk-import-root yk-protect-mgmt yk-test yk-sign-intermediate yk-change-pin yk-change-puk yk-unblock-pin yk-change-mgmt"
 pki_action_is_tty() { case " $PKI_TTY_ACTIONS " in *" $1 "*) return 0 ;; esac; return 1; }
 
 pki_action_valid() { case " $(printf '%s' "$PKI_ACTIONS" | tr '\n' ' ') " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -1032,6 +1032,7 @@ pki_run_action() {
         yk-retries)          act_yk_retries ;;
         yk-pkcs11)           act_yk_pkcs11 ;;
         yk-protect-mgmt)     act_yk_protect_mgmt ;;
+        yk-import-root)      act_yk_import_root "${arg:-$YUBIKEY_SLOT}" ;;
         yk-test)             act_yk_test "${arg:-$YUBIKEY_SLOT}" ;;
         yk-sign-intermediate) act_yk_sign_intermediate "$arg" ;;
         yk-change-pin)       act_yk_change_pin ;;
@@ -1141,6 +1142,32 @@ act_yk_export_cert() {
     install -m 0644 "$tmp" "$ROOT_CA_CRT"
     rm -f "$tmp"
     pki_ok "root CA cert written: $ROOT_CA_CRT ($(pki_cert_days "$ROOT_CA_CRT")d left)"
+}
+
+# Store the on-disk root certificate in the slot. Cosmetic - the disk copy is
+# what signs - so it is a separate action rather than a step that can block a
+# CA build.
+act_yk_import_root() {
+    local slot="${1:-$YUBIKEY_SLOT}" tmp
+    pki_yk_ready || return 1
+    pki_tty_required yk-import-root || return 2
+    pki_require_files "$ROOT_CA_CRT" || return 1
+    if ! pki_cert_is_ca "$ROOT_CA_CRT"; then
+        pki_err "$ROOT_CA_CRT is not a CA certificate - not storing it"
+        return 1
+    fi
+    pki_info "== store $ROOT_CA_CRT in slot $slot"
+    pki_warn "   $(pki_yk_mgmt_prompt_hint)"
+    pki_warn "   then TOUCH THE KEY - it blinks without printing anything"
+    pki_run_tty "import root certificate" pki_yk_import_cert "$slot" "$ROOT_CA_CRT" || return 1
+    tmp=$(mktemp)
+    if pki_yk_export_cert "$slot" "$tmp" && pki_cert_is_ca "$tmp"; then
+        pki_ok "slot $slot now holds the root certificate (verified CA:TRUE)"
+    else
+        pki_err "slot $slot still does not hold a CA certificate"
+        rm -f "$tmp"; return 1
+    fi
+    rm -f "$tmp"
 }
 
 act_yk_retries() {

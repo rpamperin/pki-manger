@@ -80,6 +80,21 @@ If anything fails after the key is generated, retry without regenerating it:
 time. Init resolves the URI itself as soon as the slot has a certificate and
 tells you what to put in `pki.conf` if the default was wrong.
 
+### If a slot write seems to hang
+
+Writing to a PIV slot can require a physical touch, and nothing on screen says
+so — the key just blinks. If a step stops right after you enter the PIN, touch
+the key.
+
+Storing the root certificate in the slot is a convenience, not a requirement:
+the copy under `root-ca/` is what signs and what gets distributed, and the slot
+only needs *some* certificate for PKCS#11 to expose the private key. So
+`pki-init.sh` warns and carries on if that write fails, and you can do it later:
+
+```bash
+./pki-manager.sh --run yk-import-root
+```
+
 ### The management key
 
 Writing to a PIV slot needs the management key, separate from the PIN. The
@@ -246,6 +261,7 @@ The root CA private key is in PIV slot 9c and never leaves the key.
 |---|---|
 | `yk-info`, `yk-slot`, `yk-retries`, `yk-export-cert`, `yk-pkcs11` | nothing — safe to run anywhere |
 | `yk-protect-mgmt` | current management key (enter = factory default) |
+| `yk-import-root` | management key or PIN, plus a touch |
 | `yk-test` | PIN + touch |
 | `yk-sign-intermediate [csr]` | PIN + touch — signs via the PKCS#11 engine |
 | `yk-change-pin`, `yk-change-puk`, `yk-unblock-pin`, `yk-change-mgmt` | PIN / PUK / mgmt key |

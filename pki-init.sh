@@ -307,20 +307,27 @@ else
     # and everything downstream fails much later with a confusing error.
     pki_info "   writing the root certificate to slot $YUBIKEY_SLOT"
     pki_warn "   $(pki_yk_mgmt_prompt_hint)"
-    if ! pki_run_tty "import root certificate into slot $YUBIKEY_SLOT" \
+    pki_warn "   then TOUCH THE KEY - it blinks without printing anything"
+    # Storing the certificate on the key is a convenience: the copy on disk is
+    # what signs and what gets distributed, and the slot only needs *some*
+    # certificate for PKCS#11 to expose the private key. So a failure here is
+    # reported and stepped over rather than stopping the whole build.
+    SLOT_OK=0
+    if pki_run_tty "import root certificate into slot $YUBIKEY_SLOT" \
             pki_yk_import_cert "$YUBIKEY_SLOT" "$ROOT_CA_CRT"; then
-        pki_err "the slot still holds the previous certificate"
-        exit 1
+        VERIFY=$(mktemp)
+        if pki_yk_export_cert "$YUBIKEY_SLOT" "$VERIFY" && pki_cert_is_ca "$VERIFY"; then
+            pki_ok "slot $YUBIKEY_SLOT now holds the real root certificate (verified CA:TRUE)"
+            SLOT_OK=1
+        fi
+        rm -f "$VERIFY"
     fi
-    VERIFY=$(mktemp)
-    if pki_yk_export_cert "$YUBIKEY_SLOT" "$VERIFY" && pki_cert_is_ca "$VERIFY"; then
-        pki_ok "slot $YUBIKEY_SLOT now holds the real root certificate (verified CA:TRUE)"
-    else
-        pki_err "slot $YUBIKEY_SLOT does not hold a CA certificate after import"
-        pki_err "check: ./pki-manager.sh --run yk-slot $YUBIKEY_SLOT"
-        rm -f "$VERIFY"; exit 1
+    if [ "$SLOT_OK" = 0 ]; then
+        pki_warn "could not store the root certificate on the key - CONTINUING"
+        pki_warn "  $ROOT_CA_CRT is authoritative and unaffected"
+        pki_warn "  the slot keeps its old certificate, which still lets PKCS#11 sign"
+        pki_warn "  retry later with:  ./pki-manager.sh --run yk-import-root"
     fi
-    rm -f "$VERIFY"
 fi
 
 fi   # end of root CA creation (skipped by --intermediate-only)
